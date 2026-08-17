@@ -207,31 +207,19 @@ jobs:
         # link.exe/mt.exe cannot create manifests when TEMP points at a WSL UNC path.
         shell: pwsh
         run: |
-          $cargoOutput = cargo test --lib --manifest-path src-tauri/Cargo.toml --no-run --message-format=json
+          cargo test --lib --manifest-path src-tauri/Cargo.toml --no-run
           if ($LASTEXITCODE -ne 0) {
-            $cargoOutput | Write-Host
             exit $LASTEXITCODE
           }
 
-          $testBinary = $null
-          foreach ($line in $cargoOutput) {
-            try {
-              $message = $line | ConvertFrom-Json -ErrorAction Stop
-              if ($message.reason -eq "compiler-artifact" -and
-                  $message.profile.test -eq $true -and
-                  $null -ne $message.executable -and
-                  $message.target.kind -contains "lib") {
-                $testBinary = $message.executable
-              }
-            } catch {
-              Write-Host $line
-            }
+          $testBinary = Get-ChildItem -LiteralPath "src-tauri/target/debug/deps" `
+            -Filter "cc_switch_lib-*.exe" -File |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if ($null -eq $testBinary) {
+            throw "Compiled library test executable was not found"
           }
-          if ([string]::IsNullOrWhiteSpace($testBinary) -or
-              -not (Test-Path -LiteralPath $testBinary)) {
-            throw "Cargo did not report the compiled library test executable"
-          }
-          "CC_SWITCH_TEST_BINARY=$testBinary" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC_SWITCH_TEST_BINARY=$($testBinary.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run Windows-to-WSL2 filesystem contract
         shell: pwsh
