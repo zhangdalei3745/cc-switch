@@ -37,6 +37,7 @@ export interface OpenClawProviderPreset {
   icon?: string;
   /** Icon color */
   iconColor?: string;
+  providerType?: "joycode";
   /** Mark as custom template (for UI distinction) */
   isCustomTemplate?: boolean;
   /** Suggested default model configuration */
@@ -99,6 +100,33 @@ export const openclawApiProtocols = [
  * OpenClaw provider presets list
  */
 export const openclawProviderPresets: OpenClawProviderPreset[] = [
+  {
+    name: "JD Joycode",
+    websiteUrl: "http://joycode.jd.com",
+    apiKeyUrl: "http://joycode.jd.com",
+    providerType: "joycode",
+    settingsConfig: {
+      baseUrl: "http://127.0.0.1:15721/openclaw/v1",
+      apiKey: "",
+      api: "openai-responses",
+      models: [
+        {
+          id: "joycode",
+          name: "JoyCode（登录后获取模型）",
+          contextWindow: 131072,
+          maxTokens: 32768,
+          input: ["text", "image"],
+        },
+      ],
+    },
+    category: "cn_official",
+    icon: "joycode",
+    iconColor: "#E1251B",
+    suggestedDefaults: {
+      model: { primary: "jd-joycode/joycode" },
+      modelCatalog: { "jd-joycode/joycode": { alias: "JoyCode" } },
+    },
+  },
   // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
   {
     name: "Kimi",

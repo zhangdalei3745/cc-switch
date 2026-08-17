@@ -59,6 +59,10 @@ import { resolveManagedAccountId } from "@/lib/authBinding";
 import type { ManagedAuthProvider } from "@/lib/api";
 import { useCopilotAuth, useCodexOauth, useXaiOauth } from "./hooks";
 import { isOAuthProviderType } from "@/config/constants";
+import {
+  JoycodeConnectionFields,
+  type JoycodeNetwork,
+} from "./JoycodeConnectionFields";
 
 export type ClaudeDesktopProviderFormValues = ProviderFormData & {
   presetId?: string;
@@ -263,6 +267,9 @@ export function ClaudeDesktopProviderForm({
     envString(initialData?.settingsConfig, "ANTHROPIC_AUTH_TOKEN") ||
       envString(initialData?.settingsConfig, "ANTHROPIC_API_KEY"),
   );
+  const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
+    initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
+  );
   const [apiKeyField, setApiKeyField] = useState<ApiKeyField>(() =>
     envString(initialData?.settingsConfig, "ANTHROPIC_API_KEY")
       ? "ANTHROPIC_API_KEY"
@@ -375,6 +382,7 @@ export function ClaudeDesktopProviderForm({
   );
   const activeProviderType =
     activePreset?.providerType ?? initialData?.meta?.providerType;
+  const isJoycodeProvider = activeProviderType === "joycode";
   const { isAuthenticated: isCopilotAuthenticated, accounts: copilotAccounts } =
     useCopilotAuth();
   const {
@@ -784,6 +792,10 @@ export function ClaudeDesktopProviderForm({
 
     meta.claudeDesktopModelRoutes = routeMap;
     meta.providerType = activeProviderType;
+    meta.joycodeNetwork = isJoycodeProvider ? joycodeNetwork : undefined;
+    meta.joycodeExternalBaseUrl = isJoycodeProvider
+      ? initialData?.meta?.joycodeExternalBaseUrl
+      : undefined;
     meta.authBinding =
       activeProviderType === "github_copilot"
         ? {
@@ -873,6 +885,14 @@ export function ClaudeDesktopProviderForm({
           />
         )}
 
+        {isJoycodeProvider && (
+          <JoycodeConnectionFields
+            network={joycodeNetwork}
+            onNetworkChange={setJoycodeNetwork}
+            onCredential={setApiKey}
+          />
+        )}
+
         <BasicFormFields form={form} />
 
         {isOfficial && (
@@ -919,7 +939,7 @@ export function ClaudeDesktopProviderForm({
                   />
                 )}
               </div>
-            ) : (
+            ) : !isJoycodeProvider ? (
               <ApiKeySection
                 value={apiKey}
                 onChange={setApiKey}
@@ -929,25 +949,27 @@ export function ClaudeDesktopProviderForm({
                 isPartner={apiKeyLinkIsPartner}
                 partnerPromotionKey={apiKeyLinkPromotionKey}
               />
-            )}
+            ) : null}
 
-            <EndpointField
-              id="baseUrl"
-              label={t("providerForm.apiEndpoint")}
-              value={baseUrl}
-              onChange={(v) => setBaseUrl(v)}
-              placeholder={t("providerForm.apiEndpointPlaceholder")}
-              hint={
-                needsModelMapping && apiFormat === "openai_responses"
-                  ? t("providerForm.apiHintResponses")
-                  : needsModelMapping && apiFormat === "openai_chat"
-                    ? t("providerForm.apiHintOAI")
-                    : needsModelMapping && apiFormat === "gemini_native"
-                      ? t("providerForm.apiHintGeminiNative")
-                      : t("providerForm.apiHint")
-              }
-              showManageButton={false}
-            />
+            {!isJoycodeProvider && (
+              <EndpointField
+                id="baseUrl"
+                label={t("providerForm.apiEndpoint")}
+                value={baseUrl}
+                onChange={(v) => setBaseUrl(v)}
+                placeholder={t("providerForm.apiEndpointPlaceholder")}
+                hint={
+                  needsModelMapping && apiFormat === "openai_responses"
+                    ? t("providerForm.apiHintResponses")
+                    : needsModelMapping && apiFormat === "openai_chat"
+                      ? t("providerForm.apiHintOAI")
+                      : needsModelMapping && apiFormat === "gemini_native"
+                        ? t("providerForm.apiHintGeminiNative")
+                        : t("providerForm.apiHint")
+                }
+                showManageButton={false}
+              />
+            )}
 
             <div className="space-y-4 border-l border-border-default pl-3">
               <div className="flex items-stretch justify-between gap-4">
@@ -1012,7 +1034,7 @@ export function ClaudeDesktopProviderForm({
 
               {needsModelMapping && (
                 <div className="space-y-4 border-t border-border-default pt-4">
-                  {activeProviderType !== "xai_oauth" && (
+                  {activeProviderType !== "xai_oauth" && !isJoycodeProvider && (
                     <div className="space-y-2">
                       <Label>
                         {t("providerForm.apiFormat", {

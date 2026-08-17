@@ -16,6 +16,40 @@ const codexConfig = (wireApi: "chat_completions" | "responses") =>
   `model_provider = "custom"\n\n[model_providers.custom]\nname = "X"\nbase_url = "https://x.example/v1"\nwire_api = "${wireApi}"\n`;
 
 describe("providerNeedsRouting", () => {
+  it("JoyCode 在所有支持的客户端中都强制经过本地协议网关", () => {
+    const apps: AppId[] = [
+      "claude",
+      "codex",
+      "gemini",
+      "grokbuild",
+      "opencode",
+      "openclaw",
+      "hermes",
+      "pi",
+      "claude-desktop",
+    ];
+    for (const app of apps) {
+      expect(
+        providerNeedsRouting(
+          app,
+          mkProvider({
+            category: "cn_official",
+            meta: { providerType: "joycode", apiFormat: "anthropic" },
+          }),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      providerNeedsRouting(
+        "codex",
+        mkProvider({
+          category: "official",
+          meta: { providerType: "joycode" },
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("allows only native-login and managed Codex Official cards during takeover", () => {
     const native = mkProvider({ id: "codex-official", category: "official" });
     const managed = mkProvider({

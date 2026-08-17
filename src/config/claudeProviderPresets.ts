@@ -60,7 +60,7 @@ export interface ProviderPreset {
   // 供应商类型标识（用于特殊供应商检测）
   // - "github_copilot": GitHub Copilot 供应商（需要 OAuth 认证）
   // - "codex_oauth": OpenAI Codex via ChatGPT Plus/Pro 反代（需要 OAuth 认证）
-  providerType?: "github_copilot" | "codex_oauth" | "xai_oauth";
+  providerType?: "github_copilot" | "codex_oauth" | "xai_oauth" | "joycode";
 
   // 是否需要 OAuth 认证（而非 API Key）
   requiresOAuth?: boolean;
@@ -89,6 +89,26 @@ export const providerPresets: ProviderPreset[] = [
     },
     icon: "anthropic",
     iconColor: "#D4915D",
+  },
+  {
+    name: "JD Joycode",
+    websiteUrl: "http://joycode.jd.com",
+    apiKeyUrl: "http://joycode.jd.com",
+    providerType: "joycode",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "http://joycode-api-saas.jd.com",
+        ANTHROPIC_AUTH_TOKEN: "",
+        ANTHROPIC_MODEL: "joycode",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "joycode",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "joycode",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "joycode",
+      },
+    },
+    apiFormat: "openai_responses",
+    category: "cn_official",
+    icon: "joycode",
+    iconColor: "#E1251B",
   },
   // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
   {

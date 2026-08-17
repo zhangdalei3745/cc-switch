@@ -16,6 +16,7 @@ export interface OpenCodeProviderPreset {
   theme?: PresetTheme;
   icon?: string;
   iconColor?: string;
+  providerType?: "joycode";
   isCustomTemplate?: boolean;
 }
 
@@ -286,6 +287,25 @@ export function getPresetModelDefaults(
 }
 
 export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
+  {
+    name: "JD Joycode",
+    websiteUrl: "http://joycode.jd.com",
+    apiKeyUrl: "http://joycode.jd.com",
+    providerType: "joycode",
+    settingsConfig: {
+      npm: "@ai-sdk/openai",
+      name: "JD Joycode",
+      options: {
+        baseURL: "http://127.0.0.1:15721/opencode/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: { joycode: { name: "JoyCode（登录后获取模型）" } },
+    },
+    category: "cn_official",
+    icon: "joycode",
+    iconColor: "#E1251B",
+  },
   // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
   {
     name: "Kimi",

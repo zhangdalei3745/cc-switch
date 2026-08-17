@@ -56,7 +56,7 @@ export interface ClaudeDesktopProviderPreset {
   mode: "direct" | "proxy";
   apiFormat?: ClaudeDesktopApiFormat;
   modelRoutes?: ClaudeDesktopRoutePreset[];
-  providerType?: "github_copilot" | "codex_oauth" | "xai_oauth";
+  providerType?: "github_copilot" | "codex_oauth" | "xai_oauth" | "joycode";
   requiresOAuth?: boolean;
 
   endpointCandidates?: string[];
@@ -152,6 +152,19 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     },
     icon: "anthropic",
     iconColor: "#D4915D",
+  },
+  {
+    name: "JD Joycode",
+    websiteUrl: "http://joycode.jd.com",
+    apiKeyUrl: "http://joycode.jd.com",
+    category: "cn_official",
+    providerType: "joycode",
+    baseUrl: "http://joycode-api-saas.jd.com",
+    mode: "proxy",
+    apiFormat: "openai_responses",
+    modelRoutes: brandedRoutes("joycode", "joycode", "joycode"),
+    icon: "joycode",
+    iconColor: "#E1251B",
   },
   // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
   {

@@ -52,6 +52,10 @@ import {
 } from "@/utils/grokBuildConfig";
 import { resolveProviderIcon } from "@/utils/providerIcon";
 import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
+import {
+  JoycodeConnectionFields,
+  type JoycodeNetwork,
+} from "./JoycodeConnectionFields";
 
 type GrokBuildProviderFormProps = Omit<ProviderFormProps, "appId">;
 
@@ -156,6 +160,15 @@ export function GrokBuildProviderForm({
   const [draftCustomEndpoints, setDraftCustomEndpoints] = useState<string[]>(
     [],
   );
+  const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
+    initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
+  );
+  const selectedPreset = grokPresetEntries.find(
+    (entry) => entry.id === selectedPresetId,
+  )?.preset;
+  const isJoycodeProvider =
+    initialData?.meta?.providerType === "joycode" ||
+    selectedPreset?.providerType === "joycode";
 
   const form = useForm<ProviderFormData>({
     resolver: zodResolver(providerSchema),
@@ -384,6 +397,11 @@ export function GrokBuildProviderForm({
     delete initialMeta.custom_endpoints;
     const meta: ProviderMeta = {
       ...initialMeta,
+      providerType: isJoycodeProvider ? "joycode" : undefined,
+      joycodeNetwork: isJoycodeProvider ? joycodeNetwork : undefined,
+      joycodeExternalBaseUrl: isJoycodeProvider
+        ? initialData?.meta?.joycodeExternalBaseUrl
+        : undefined,
       apiFormat,
       apiKeyField: anthropicAuthField,
       isFullUrl,
@@ -437,9 +455,20 @@ export function GrokBuildProviderForm({
           />
         )}
 
+        {isJoycodeProvider && (
+          <JoycodeConnectionFields
+            network={joycodeNetwork}
+            onNetworkChange={setJoycodeNetwork}
+            onCredential={(ptKey) => {
+              setApiKey(ptKey);
+              syncStructuredConfig({ apiKey: ptKey });
+            }}
+          />
+        )}
+
         <BasicFormFields form={form} />
 
-        {category !== "official" && (
+        {category !== "official" && !isJoycodeProvider && (
           <>
             <CodexFormFields
               appId="grokbuild"

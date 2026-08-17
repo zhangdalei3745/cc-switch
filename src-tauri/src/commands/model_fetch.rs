@@ -101,6 +101,42 @@ pub async fn fetch_models_for_config(
     api_format: Option<String>,
     request_headers: Option<BTreeMap<String, String>>,
 ) -> Result<Vec<FetchedModel>, String> {
+    // JoyCode 的模型目录是带签名的 POST 协议，不是 OpenAI GET /v1/models。
+    // 对预设内网地址做兼容分流，使所有现有应用表单的“获取模型”按钮无需
+    // 各自复制 JoyCode 协议实现。外网地址仍走显式 fetch_joycode_models，
+    // 因为参考客户端没有给出可安全识别的官方外网 host。
+    if crate::proxy::providers::joycode::is_internal_base_url(&base_url) {
+        let provider = crate::provider::Provider {
+            id: "joycode-model-fetch".to_string(),
+            name: "JD Joycode".to_string(),
+            settings_config: serde_json::json!({}),
+            website_url: None,
+            category: Some("cn_official".to_string()),
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: Some(crate::provider::ProviderMeta {
+                provider_type: Some("joycode".to_string()),
+                joycode_network: Some("internal".to_string()),
+                ..Default::default()
+            }),
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        return crate::proxy::providers::joycode::fetch_models(&provider, &api_key)
+            .await
+            .map(|models| {
+                models
+                    .into_iter()
+                    .map(|model| FetchedModel {
+                        id: model.id,
+                        owned_by: Some(model.owned_by),
+                    })
+                    .collect()
+            });
+    }
+
     // 与转发 / 检测路径共用 parse_custom_user_agent：非法 UA 静默忽略（不阻断取模型）。
     let user_agent = crate::provider::parse_custom_user_agent(custom_user_agent.as_deref())
         .ok()
@@ -115,6 +151,51 @@ pub async fn fetch_models_for_config(
         request_headers.as_ref(),
     )
     .await
+}
+
+/// Fetch the JoyCode model catalog using its dedicated POST protocol.
+///
+/// The external gateway host is intentionally optional: the reference client
+/// does not define a public host, therefore selecting `external` without an
+/// official address returns a configuration error instead of guessing.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn fetch_joycode_models(
+    provider_id: String,
+    network: String,
+    external_base_url: Option<String>,
+    pt_key: String,
+) -> Result<Vec<crate::proxy::providers::joycode::JoycodeModel>, String> {
+    let provider = crate::provider::Provider {
+        id: if provider_id.trim().is_empty() {
+            "joycode-preview".to_string()
+        } else {
+            provider_id
+        },
+        name: "JD Joycode".to_string(),
+        settings_config: serde_json::json!({}),
+        website_url: Some(crate::proxy::providers::joycode::JOYCODE_WEBSITE_URL.to_string()),
+        category: Some("cn_official".to_string()),
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(crate::provider::ProviderMeta {
+            provider_type: Some("joycode".to_string()),
+            joycode_network: Some(network),
+            joycode_external_base_url: external_base_url,
+            ..Default::default()
+        }),
+        icon: Some("joycode".to_string()),
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    crate::proxy::providers::joycode::fetch_models(&provider, &pt_key).await
+}
+
+#[tauri::command]
+pub async fn discover_joycode_pt_key() -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(crate::proxy::providers::joycode::discover_latest_pt_key)
+        .await
+        .map_err(|error| format!("JoyCode credential discovery failed: {error}"))
 }
 
 #[cfg(test)]

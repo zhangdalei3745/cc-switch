@@ -24,6 +24,7 @@ pub mod copilot_model_map;
 mod gemini;
 pub(crate) mod gemini_schema;
 pub mod gemini_shadow;
+pub mod joycode;
 pub mod models;
 pub(crate) mod reasoning_bridge;
 pub mod streaming;
@@ -90,6 +91,8 @@ pub enum ProviderType {
     CodexOAuth,
     /// xAI Grok OAuth（需要 Anthropic ↔ Responses API 转换）
     XaiOAuth,
+    /// JD JoyCode dynamic multi-protocol gateway.
+    Joycode,
 }
 
 impl ProviderType {
@@ -104,6 +107,7 @@ impl ProviderType {
             ProviderType::GitHubCopilot => true,
             ProviderType::CodexOAuth => true,
             ProviderType::XaiOAuth => true,
+            ProviderType::Joycode => true,
             ProviderType::OpenRouter => false,
             _ => false,
         }
@@ -122,6 +126,7 @@ impl ProviderType {
             ProviderType::GitHubCopilot => "https://api.githubcopilot.com",
             ProviderType::CodexOAuth => CHATGPT_CODEX_BASE_URL,
             ProviderType::XaiOAuth => XAI_API_BASE_URL,
+            ProviderType::Joycode => joycode::JOYCODE_INTERNAL_BASE_URL,
         }
     }
 
@@ -130,6 +135,9 @@ impl ProviderType {
     /// 根据配置中的 base_url、auth_mode、api_key 格式等信息推断具体的供应商类型
     #[allow(dead_code)]
     pub fn from_app_type_and_config(app_type: &AppType, provider: &Provider) -> Option<Self> {
+        if joycode::is_joycode_provider(provider) {
+            return Some(ProviderType::Joycode);
+        }
         let provider_type = match app_type {
             AppType::Claude | AppType::ClaudeDesktop => {
                 if get_claude_api_format(provider) == "gemini_native" {
@@ -225,6 +233,7 @@ impl ProviderType {
             ProviderType::GitHubCopilot => "github_copilot",
             ProviderType::CodexOAuth => "codex_oauth",
             ProviderType::XaiOAuth => "xai_oauth",
+            ProviderType::Joycode => "joycode",
         }
     }
 }
@@ -251,6 +260,7 @@ impl std::str::FromStr for ProviderType {
             }
             "codex_oauth" | "codex-oauth" | "codexoauth" => Ok(ProviderType::CodexOAuth),
             "xai_oauth" | "xai-oauth" | "xaioauth" => Ok(ProviderType::XaiOAuth),
+            "joycode" | "jd_joycode" | "jd-joycode" => Ok(ProviderType::Joycode),
             _ => Err(format!("Invalid provider type: {s}")),
         }
     }
@@ -264,7 +274,7 @@ pub fn get_adapter(app_type: &AppType) -> Option<Box<dyn ProviderAdapter>> {
         AppType::Gemini => Box::new(GeminiAdapter::new()),
         AppType::GrokBuild => Box::new(CodexAdapter::new()),
         AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => Box::new(CodexAdapter::new()),
-        AppType::Pi => return None,
+        AppType::Pi => Box::new(CodexAdapter::new()),
     })
 }
 
@@ -278,6 +288,7 @@ pub fn get_adapter_for_provider_type(provider_type: &ProviderType) -> Box<dyn Pr
         | ProviderType::GitHubCopilot
         | ProviderType::CodexOAuth
         | ProviderType::XaiOAuth => Box::new(ClaudeAdapter::new()),
+        ProviderType::Joycode => Box::new(CodexAdapter::new()),
         ProviderType::Codex => Box::new(CodexAdapter::new()),
         ProviderType::Gemini | ProviderType::GeminiCli => Box::new(GeminiAdapter::new()),
     }
@@ -398,6 +409,10 @@ mod tests {
             "xai_oauth".parse::<ProviderType>().unwrap(),
             ProviderType::XaiOAuth
         );
+        assert_eq!(
+            "jd-joycode".parse::<ProviderType>().unwrap(),
+            ProviderType::Joycode
+        );
         assert!("invalid".parse::<ProviderType>().is_err());
     }
 
@@ -411,6 +426,7 @@ mod tests {
         assert_eq!(ProviderType::OpenRouter.as_str(), "openrouter");
         assert_eq!(ProviderType::GitHubCopilot.as_str(), "github_copilot");
         assert_eq!(ProviderType::XaiOAuth.as_str(), "xai_oauth");
+        assert_eq!(ProviderType::Joycode.as_str(), "joycode");
     }
 
     #[test]

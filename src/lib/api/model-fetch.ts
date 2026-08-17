@@ -7,6 +7,16 @@ export interface FetchedModel {
   ownedBy: string | null;
 }
 
+export type JoycodeWireApi = "responses" | "anthropic" | "chat";
+
+export interface JoycodeFetchedModel {
+  id: string;
+  ownedBy: string;
+  wireApi: JoycodeWireApi;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
 export interface ModelFetchOptions {
   apiFormat?: string;
   requestHeaders?: Record<string, string>;
@@ -35,6 +45,24 @@ export async function fetchModelsForConfig(
     apiFormat: options?.apiFormat,
     requestHeaders: options?.requestHeaders,
   });
+}
+
+export async function fetchJoycodeModels(options: {
+  providerId?: string;
+  network: "internal" | "external";
+  externalBaseUrl?: string;
+  ptKey: string;
+}): Promise<JoycodeFetchedModel[]> {
+  return invoke("fetch_joycode_models", {
+    providerId: options.providerId || "joycode-preview",
+    network: options.network,
+    externalBaseUrl: options.externalBaseUrl || null,
+    ptKey: options.ptKey,
+  });
+}
+
+export async function discoverJoycodePtKey(): Promise<string | null> {
+  return invoke("discover_joycode_pt_key");
 }
 
 export interface OpenCodeModelRef {

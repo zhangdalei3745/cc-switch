@@ -54,6 +54,10 @@ export function providerNeedsRouting(
   appId: AppId,
   provider: Provider,
 ): boolean {
+  // JoyCode always requires the local gateway for dedicated authentication,
+  // per-model protocol routing, SSE normalization and session reuse.
+  if (provider.meta?.providerType === "joycode") return true;
+
   if (provider.category === "official") return false;
 
   const isManagedOAuth = isOAuthProviderType(provider.meta?.providerType);

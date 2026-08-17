@@ -45,6 +45,7 @@ export interface PiProviderPreset {
   theme?: PresetTheme;
   icon?: string;
   iconColor?: string;
+  providerType?: "joycode";
 }
 
 const OPENAI_COMPLETIONS_COMPAT = {
@@ -84,6 +85,27 @@ const KIMI_K3_COMPAT = {
  * another application's presets at runtime.
  */
 const piProviderPresetDefinitions: PiProviderPreset[] = [
+  {
+    name: "JD Joycode",
+    providerKey: "cc-switch-joycode",
+    websiteUrl: "http://joycode.jd.com",
+    apiKeyUrl: "http://joycode.jd.com",
+    providerType: "joycode",
+    settingsConfig: {
+      name: "JD Joycode",
+      baseUrl: "http://127.0.0.1:15721/pi/v1",
+      api: "openai-responses",
+      apiKey: "",
+      models: [
+        piModel("joycode/dynamic", {
+          id: "joycode",
+        }),
+      ],
+    },
+    category: "cn_official",
+    icon: "joycode",
+    iconColor: "#E1251B",
+  },
   {
     name: "Kimi",
     providerKey: "cc-switch-kimi",

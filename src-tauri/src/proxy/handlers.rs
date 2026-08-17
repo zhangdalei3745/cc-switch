@@ -114,6 +114,58 @@ pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
     Ok(Json(catalog))
 }
 
+pub async fn handle_opencode_models(
+    State(state): State<ProxyState>,
+) -> Result<Json<Value>, ProxyError> {
+    handle_joycode_models_for_app(&state, AppType::OpenCode, "opencode").await
+}
+
+pub async fn handle_openclaw_models(
+    State(state): State<ProxyState>,
+) -> Result<Json<Value>, ProxyError> {
+    handle_joycode_models_for_app(&state, AppType::OpenClaw, "openclaw").await
+}
+
+pub async fn handle_hermes_models(
+    State(state): State<ProxyState>,
+) -> Result<Json<Value>, ProxyError> {
+    handle_joycode_models_for_app(&state, AppType::Hermes, "hermes").await
+}
+
+pub async fn handle_pi_models(State(state): State<ProxyState>) -> Result<Json<Value>, ProxyError> {
+    handle_joycode_models_for_app(&state, AppType::Pi, "pi").await
+}
+
+async fn handle_joycode_models_for_app(
+    state: &ProxyState,
+    app_type: AppType,
+    app_type_str: &str,
+) -> Result<Json<Value>, ProxyError> {
+    let providers = state
+        .provider_router
+        .select_providers(app_type_str)
+        .await
+        .map_err(|error| ProxyError::DatabaseError(error.to_string()))?;
+    let provider = providers.first().ok_or(ProxyError::NoAvailableProvider)?;
+    if !provider.is_joycode() {
+        return Ok(Json(json!({"object":"list", "data": []})));
+    }
+    let (_base, configured_key) = provider.resolve_usage_credentials(&app_type);
+    let pt_key = super::providers::joycode::resolve_latest_pt_key(&configured_key);
+    let models = super::providers::joycode::fetch_models(provider, &pt_key)
+        .await
+        .map_err(ProxyError::ConfigError)?;
+    Ok(Json(json!({
+        "object": "list",
+        "data": models.into_iter().map(|model| json!({
+            "id": model.id,
+            "object": "model",
+            "created": 0,
+            "owned_by": model.owned_by
+        })).collect::<Vec<_>>()
+    })))
+}
+
 // ============================================================================
 // Claude API 处理器（包含格式转换逻辑）
 // ============================================================================
@@ -845,6 +897,34 @@ pub async fn handle_grokbuild_responses(
     .await
 }
 
+pub async fn handle_opencode_responses(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    handle_responses_for_app(state, request, AppType::OpenCode, "OpenCode", "opencode").await
+}
+
+pub async fn handle_openclaw_responses(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    handle_responses_for_app(state, request, AppType::OpenClaw, "OpenClaw", "openclaw").await
+}
+
+pub async fn handle_hermes_responses(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    handle_responses_for_app(state, request, AppType::Hermes, "Hermes", "hermes").await
+}
+
+pub async fn handle_pi_responses(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    handle_responses_for_app(state, request, AppType::Pi, "Pi", "pi").await
+}
+
 async fn handle_responses_for_app(
     state: ProxyState,
     request: axum::extract::Request,
@@ -904,11 +984,14 @@ async fn handle_responses_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    let actual_wire_format = result.claude_api_format.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
 
-    if super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint) {
+    if actual_wire_format.as_deref() == Some("anthropic")
+        || super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint)
+    {
         return handle_codex_anthropic_to_responses_transform(
             response,
             &ctx,
@@ -920,7 +1003,9 @@ async fn handle_responses_for_app(
         .await;
     }
 
-    if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
+    if actual_wire_format.as_deref() == Some("openai_chat")
+        || super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint)
+    {
         return handle_codex_chat_to_responses_transform(
             response,
             &ctx,
@@ -2083,10 +2168,59 @@ pub async fn handle_gemini(
         .map(|pq| pq.as_str())
         .unwrap_or(uri.path());
 
-    let is_stream = body
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let is_stream = endpoint.contains(":streamGenerateContent")
+        || body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let original_body = body.clone();
+
+    if ctx.provider.is_joycode() && method == axum::http::Method::GET {
+        let path = endpoint.split('?').next().unwrap_or(endpoint);
+        if path.ends_with("/models") || (path.contains("/models/") && !path.contains(':')) {
+            let (_base, configured_key) = ctx.provider.resolve_usage_credentials(&AppType::Gemini);
+            let pt_key = super::providers::joycode::resolve_latest_pt_key(&configured_key);
+            let models = super::providers::joycode::fetch_models(&ctx.provider, &pt_key)
+                .await
+                .map_err(ProxyError::ConfigError)?;
+            let entries: Vec<Value> = models
+                .into_iter()
+                .map(|model| {
+                    json!({
+                        "name": format!("models/{}", model.id),
+                        "displayName": model.id,
+                        "inputTokenLimit": model.context_window.unwrap_or(131_072),
+                        "outputTokenLimit": model.max_output_tokens.unwrap_or(32_768),
+                        "supportedGenerationMethods": ["generateContent", "streamGenerateContent", "countTokens"]
+                    })
+                })
+                .collect();
+            if path.ends_with("/models") {
+                return Ok(Json(json!({"models": entries})).into_response());
+            }
+            let wanted = super::providers::joycode::model_from_gemini_endpoint(path);
+            let model = entries
+                .into_iter()
+                .find(|entry| {
+                    entry
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.strip_prefix("models/") == wanted.as_deref())
+                })
+                .ok_or_else(|| ProxyError::InvalidRequest("Unknown JoyCode model".to_string()))?;
+            return Ok(Json(model).into_response());
+        }
+    }
+
+    // Gemini CLI may call countTokens before generation. JoyCode has no
+    // dedicated count endpoint; answer locally to avoid accidentally turning a
+    // counting probe into a billed generation request.
+    if ctx.provider.is_joycode() && endpoint.contains(":countTokens") {
+        return Ok(Json(json!({
+            "totalTokens": estimate_gemini_request_tokens(&body)
+        }))
+        .into_response());
+    }
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -2112,9 +2246,36 @@ pub async fn handle_gemini(
     };
 
     let connection_guard = result.connection_guard.take();
+    let joycode_wire_format = result.claude_api_format.clone();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
+
+    if ctx.provider.is_joycode() {
+        let wire_format = joycode_wire_format.as_deref().unwrap_or("anthropic");
+        let anthropic_response = if wire_format == "anthropic" {
+            process_response(
+                response,
+                &ctx,
+                &state,
+                &CLAUDE_PARSER_CONFIG,
+                connection_guard,
+            )
+            .await?
+        } else {
+            handle_claude_transform(
+                response,
+                &ctx,
+                &state,
+                &original_body,
+                is_stream,
+                wire_format,
+                connection_guard,
+            )
+            .await?
+        };
+        return convert_anthropic_response_to_gemini(anthropic_response, is_stream).await;
+    }
 
     process_response(
         response,
@@ -2124,6 +2285,142 @@ pub async fn handle_gemini(
         connection_guard,
     )
     .await
+}
+
+fn estimate_gemini_request_tokens(body: &Value) -> u64 {
+    fn visit(value: &Value, text_bytes: &mut u64, media_parts: &mut u64, parent: Option<&str>) {
+        match value {
+            Value::String(text) if parent == Some("data") => {
+                if !text.is_empty() {
+                    *media_parts += 1;
+                }
+            }
+            Value::String(text) => *text_bytes += text.len() as u64,
+            Value::Array(values) => {
+                for value in values {
+                    visit(value, text_bytes, media_parts, parent);
+                }
+            }
+            Value::Object(values) => {
+                for (key, value) in values {
+                    visit(value, text_bytes, media_parts, Some(key));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut text_bytes = 0;
+    let mut media_parts = 0;
+    visit(body, &mut text_bytes, &mut media_parts, None);
+    text_bytes.div_ceil(4).saturating_add(media_parts * 258)
+}
+
+/// Gemini clients require GenerateContentResponse payloads even when JoyCode
+/// selects an Anthropic/OpenAI wire protocol for the model. The shared Claude
+/// response bridges first normalize all three protocols to one Anthropic
+/// message; this final adapter converts it back to Gemini. Streaming conversion
+/// remains incremental so large text/tool outputs are not buffered twice.
+async fn convert_anthropic_response_to_gemini(
+    response: axum::response::Response,
+    streaming: bool,
+) -> Result<axum::response::Response, ProxyError> {
+    let (parts, body) = response.into_parts();
+    if !parts.status.is_success() {
+        return Ok(axum::response::Response::from_parts(parts, body));
+    }
+    if streaming {
+        let stream = body.into_data_stream();
+        let normalizer = super::providers::joycode::AnthropicToGeminiSseNormalizer::default();
+        let normalized = futures::stream::unfold(
+            (Box::pin(stream), normalizer, false),
+            |(mut stream, mut normalizer, finished)| async move {
+                if finished {
+                    return None;
+                }
+                loop {
+                    match stream.next().await {
+                        Some(Ok(chunk)) => {
+                            let output = normalizer.push_bytes(&chunk);
+                            if output.is_empty() {
+                                continue;
+                            }
+                            return Some((
+                                Ok::<Bytes, std::io::Error>(Bytes::from(output)),
+                                (stream, normalizer, false),
+                            ));
+                        }
+                        Some(Err(error)) => {
+                            return Some((
+                                Err(std::io::Error::other(error)),
+                                (stream, normalizer, true),
+                            ));
+                        }
+                        None => {
+                            let output = normalizer.finish();
+                            if output.is_empty() {
+                                return None;
+                            }
+                            return Some((Ok(Bytes::from(output)), (stream, normalizer, true)));
+                        }
+                    }
+                }
+            },
+        );
+        let mut builder = axum::response::Response::builder().status(parts.status);
+        for (name, value) in &parts.headers {
+            if name != axum::http::header::CONTENT_TYPE
+                && name != axum::http::header::CONTENT_LENGTH
+                && name != axum::http::header::CONTENT_ENCODING
+            {
+                builder = builder.header(name, value);
+            }
+        }
+        return builder
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "text/event-stream; charset=utf-8",
+            )
+            .body(axum::body::Body::from_stream(normalized))
+            .map_err(|error| ProxyError::Internal(format!("Failed to build Gemini SSE: {error}")));
+    }
+    let bytes = axum::body::to_bytes(body, super::hyper_client::MAX_RESPONSE_BODY_BYTES)
+        .await
+        .map_err(|error| {
+            ProxyError::TransformError(format!(
+                "Failed to read normalized JoyCode response: {error}"
+            ))
+        })?;
+    let text = String::from_utf8_lossy(&bytes);
+    let anthropic = if text.trim_start().starts_with("event:") {
+        transform_codex_anthropic::anthropic_sse_to_message_value(&text)?
+    } else {
+        serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+            ProxyError::TransformError(format!(
+                "Failed to parse normalized JoyCode Anthropic response: {error}"
+            ))
+        })?
+    };
+    let gemini = super::providers::joycode::anthropic_message_to_gemini(&anthropic);
+    let encoded = serde_json::to_vec(&gemini).map_err(|error| {
+        ProxyError::TransformError(format!("Failed to encode JoyCode Gemini response: {error}"))
+    })?;
+
+    let mut builder = axum::response::Response::builder().status(parts.status);
+    for (name, value) in &parts.headers {
+        if name != axum::http::header::CONTENT_TYPE
+            && name != axum::http::header::CONTENT_LENGTH
+            && name != axum::http::header::CONTENT_ENCODING
+        {
+            builder = builder.header(name, value);
+        }
+    }
+    builder = builder.header(
+        axum::http::header::CONTENT_TYPE,
+        "application/json; charset=utf-8",
+    );
+    builder
+        .body(axum::body::Body::from(encoded))
+        .map_err(|error| ProxyError::Internal(format!("Failed to build Gemini response: {error}")))
 }
 
 fn should_use_claude_transform_streaming(

@@ -80,6 +80,10 @@ impl Provider {
             || self.claude_base_url_contains("githubcopilot.com")
     }
 
+    pub fn is_joycode(&self) -> bool {
+        self.provider_type() == Some("joycode")
+    }
+
     pub fn uses_managed_account_auth(&self) -> bool {
         self.is_github_copilot()
             || self.is_codex_oauth()
@@ -548,6 +552,16 @@ pub struct ProviderMeta {
     /// - "github_copilot": GitHub Copilot 供应商
     #[serde(rename = "providerType", skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<String>,
+    /// JoyCode network selector. Only `internal` and `external` are accepted.
+    #[serde(rename = "joycodeNetwork", skip_serializing_if = "Option::is_none")]
+    pub joycode_network: Option<String>,
+    /// Official external HTTPS gateway base. The public host is not derivable
+    /// from the reference implementation, so it must come from trusted config.
+    #[serde(
+        rename = "joycodeExternalBaseUrl",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub joycode_external_base_url: Option<String>,
     /// GitHub Copilot 关联账号 ID（仅 github_copilot 供应商使用）
     /// 用于多账号支持，关联到特定的 GitHub 账号
     #[serde(rename = "githubAccountId", skip_serializing_if = "Option::is_none")]
