@@ -509,7 +509,7 @@ jobs:
 
           EXECUTABLE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
             "$APP_PATH/Contents/Info.plist")
-          lipo -verify_arch x86_64 arm64 "$APP_PATH/Contents/MacOS/$EXECUTABLE_NAME"
+          lipo "$APP_PATH/Contents/MacOS/$EXECUTABLE_NAME" -verify_arch x86_64 arm64
           hdiutil verify "$DMG_PATH"
           unzip -t "$ZIP_PATH"
           echo "✅ Unsigned universal macOS artifacts passed integrity checks."
