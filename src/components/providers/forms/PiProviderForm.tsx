@@ -1344,6 +1344,7 @@ export function PiProviderForm({
           <JoycodeConnectionFields
             network={joycodeNetwork}
             onNetworkChange={setJoycodeNetwork}
+            credential={apiKey}
             onCredential={setApiKey}
           />
         )}

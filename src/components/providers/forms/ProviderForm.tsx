@@ -2217,6 +2217,19 @@ function ProviderFormFull({
             <JoycodeConnectionFields
               network={joycodeNetwork}
               onNetworkChange={setJoycodeNetwork}
+              credential={
+                appId === "codex"
+                  ? codexApiKey
+                  : appId === "gemini"
+                    ? geminiApiKey
+                    : appId === "opencode"
+                      ? opencodeForm.opencodeApiKey
+                      : appId === "openclaw"
+                        ? openclawForm.openclawApiKey
+                        : appId === "hermes"
+                          ? hermesForm.hermesApiKey
+                          : apiKey
+              }
               onCredential={handleJoycodeCredential}
             />
           )}

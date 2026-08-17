@@ -459,6 +459,7 @@ export function GrokBuildProviderForm({
           <JoycodeConnectionFields
             network={joycodeNetwork}
             onNetworkChange={setJoycodeNetwork}
+            credential={apiKey}
             onCredential={(ptKey) => {
               setApiKey(ptKey);
               syncStructuredConfig({ apiKey: ptKey });

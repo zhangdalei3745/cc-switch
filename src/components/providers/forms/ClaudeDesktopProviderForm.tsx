@@ -889,6 +889,7 @@ export function ClaudeDesktopProviderForm({
           <JoycodeConnectionFields
             network={joycodeNetwork}
             onNetworkChange={setJoycodeNetwork}
+            credential={apiKey}
             onCredential={setApiKey}
           />
         )}

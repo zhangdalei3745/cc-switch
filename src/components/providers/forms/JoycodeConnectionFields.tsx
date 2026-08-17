@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { settingsApi } from "@/lib/api";
 import {
   discoverJoycodePtKey,
   fetchJoycodeModels,
@@ -15,29 +15,23 @@ export type JoycodeNetwork = "internal" | "external";
 interface JoycodeConnectionFieldsProps {
   network: JoycodeNetwork;
   onNetworkChange: (network: JoycodeNetwork) => void;
+  credential: string;
   onCredential: (ptKey: string) => void;
 }
 
-// The reference client only defines the official product address. Do not
-// invent a private login path; the official site owns its current login route.
-const JOYCODE_LOGIN_URL = "http://joycode.jd.com";
-
-const wait = (milliseconds: number) =>
-  new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
-
 /**
- * JoyCode 的网页登录不会把浏览器 Cookie 暴露给 CC Switch。这里打开官方
- * 登录页，并在后台只读检测 JoyCode/JoyCoder 官方客户端写入的本机凭据。
+ * JoyCode 官网没有向第三方桌面应用提供认证回调。认证值由用户手动填写，
+ * 也可以显式触发一次官方 JoyCode/JoyCoder 客户端本机凭据检测。
  */
 export function JoycodeConnectionFields({
   network,
   onNetworkChange,
+  credential,
   onCredential,
 }: JoycodeConnectionFieldsProps) {
   const { t } = useTranslation();
   const [detecting, setDetecting] = useState(false);
   const [loadingModels, setLoadingModels] = useState(false);
-  const [credential, setCredential] = useState("");
   const [models, setModels] = useState<JoycodeFetchedModel[]>([]);
   const mountedRef = useRef(true);
 
@@ -48,13 +42,14 @@ export function JoycodeConnectionFields({
     [],
   );
 
-  const loadModels = async (ptKey = credential) => {
-    if (!ptKey) return;
+  const loadModels = async (ptKey = credential.trim()) => {
+    const normalizedPtKey = ptKey.trim();
+    if (!normalizedPtKey) return;
     setLoadingModels(true);
     try {
       const catalog = await fetchJoycodeModels({
         network,
-        ptKey,
+        ptKey: normalizedPtKey,
       });
       setModels(catalog);
       toast.success(
@@ -75,28 +70,19 @@ export function JoycodeConnectionFields({
     }
   };
 
-  const detectCredential = async (openLoginPage: boolean) => {
-    if (openLoginPage) {
-      await settingsApi.openExternal(JOYCODE_LOGIN_URL);
-    }
+  const detectCredential = async () => {
     setDetecting(true);
     try {
-      // 登录完成时间不可预测；最多等待两分钟，期间不读取浏览器 Cookie。
-      for (let attempt = 0; attempt < 60 && mountedRef.current; attempt += 1) {
-        const ptKey = await discoverJoycodePtKey();
-        if (ptKey) {
-          setCredential(ptKey);
-          onCredential(ptKey);
-          toast.success(
-            t("joycode.credentialImported", {
-              defaultValue: "已从 JoyCode 官方客户端导入认证凭据",
-            }),
-          );
-          await loadModels(ptKey);
-          return;
-        }
-        if (!openLoginPage) break;
-        await wait(2000);
+      const ptKey = await discoverJoycodePtKey();
+      if (ptKey) {
+        onCredential(ptKey);
+        toast.success(
+          t("joycode.credentialImported", {
+            defaultValue: "已从 JoyCode 官方客户端导入认证凭据",
+          }),
+        );
+        await loadModels(ptKey);
+        return;
       }
       if (mountedRef.current) {
         toast.info(
@@ -150,33 +136,50 @@ export function JoycodeConnectionFields({
         )}
       </div>
 
+      <div className="space-y-2">
+        <Label htmlFor="joycode-pt-key">
+          {t("joycode.ptKey", { defaultValue: "JoyCode ptKey" })}
+        </Label>
+        <Input
+          id="joycode-pt-key"
+          type="password"
+          autoComplete="off"
+          value={credential}
+          onChange={(event) => {
+            setModels([]);
+            onCredential(event.target.value.trim());
+          }}
+          placeholder={t("joycode.ptKeyPlaceholder", {
+            defaultValue: "手动粘贴 JoyCode ptKey",
+          })}
+        />
+        <p className="text-xs text-muted-foreground">
+          {t("joycode.manualCredentialHint", {
+            defaultValue:
+              "JoyCode 官网登录不会向 CC Switch 回传认证值，请手动填写 ptKey。",
+          })}
+        </p>
+      </div>
+
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
           variant="outline"
           disabled={detecting}
-          onClick={() => void detectCredential(true)}
+          onClick={() => void detectCredential()}
         >
           {detecting
-            ? t("joycode.waitingForLogin", { defaultValue: "等待登录…" })
-            : t("joycode.loginAndImport", {
-                defaultValue: "打开 JoyCode 登录并自动导入",
+            ? t("joycode.detectingCredential", {
+                defaultValue: "检测本机凭据…",
+              })
+            : t("joycode.detectLocalCredential", {
+                defaultValue: "从本机 JoyCode 导入",
               })}
         </Button>
         <Button
           type="button"
           variant="ghost"
-          disabled={detecting}
-          onClick={() => void detectCredential(false)}
-        >
-          {t("joycode.detectLocalCredential", {
-            defaultValue: "检测本机凭据",
-          })}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={detecting || loadingModels || !credential}
+          disabled={detecting || loadingModels || !credential.trim()}
           onClick={() => void loadModels()}
         >
           {loadingModels
@@ -200,7 +203,7 @@ export function JoycodeConnectionFields({
       <p className="text-xs text-muted-foreground">
         {t("joycode.loginSecurityHint", {
           defaultValue:
-            "认证值只写入当前供应商配置；CC Switch 不读取浏览器 Cookie，也不会在界面中显示完整凭据。",
+            "认证值只写入当前供应商配置；CC Switch 不读取浏览器 Cookie，也不会显示完整凭据。",
         })}
       </p>
     </section>
