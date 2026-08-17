@@ -2290,10 +2290,8 @@ pub async fn handle_gemini(
 fn estimate_gemini_request_tokens(body: &Value) -> u64 {
     fn visit(value: &Value, text_bytes: &mut u64, media_parts: &mut u64, parent: Option<&str>) {
         match value {
-            Value::String(text) if parent == Some("data") => {
-                if !text.is_empty() {
-                    *media_parts += 1;
-                }
+            Value::String(text) if parent == Some("data") && !text.is_empty() => {
+                *media_parts += 1;
             }
             Value::String(text) => *text_bytes += text.len() as u64,
             Value::Array(values) => {
