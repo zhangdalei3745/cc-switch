@@ -20,6 +20,7 @@ use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const JOYCODE_INTERNAL_BASE_URL: &str = "http://joycode-api-saas.jd.com";
+pub const JOYCODE_EXTERNAL_BASE_URL: &str = "https://api-ai.jd.com";
 pub const JOYCODE_WEBSITE_URL: &str = "http://joycode.jd.com";
 pub const JOYCODE_CLIENT: &str = "JoyCodeIDE";
 pub const JOYCODE_CLIENT_VERSION: &str = "3.8.67";
@@ -28,9 +29,7 @@ const MODEL_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const RESPONSE_SESSION_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const RESPONSE_SESSION_LIMIT: usize = 256;
 
-// Kept byte-for-byte compatible with the referenced JoyCode IDE implementation.
-// This signature is only used for an explicitly configured HTTPS gateway base;
-// CC Switch never guesses the external host.
+// Kept byte-for-byte compatible with the current JoyCode IDE implementation.
 const JOYCODE_GATEWAY_SIGNING_KEY: &[u8] = b"0691a3f0b37b4a85aeb63ad0fc7db3ed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +74,20 @@ pub struct JoycodeModel {
     pub context_window: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoycodeCredential {
+    pub pt_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -603,7 +616,7 @@ pub fn provider_network(provider: &Provider) -> Result<JoycodeNetwork, ProxyErro
 pub fn provider_base_url(provider: &Provider) -> Result<String, ProxyError> {
     match provider_network(provider)? {
         JoycodeNetwork::Internal => Ok(JOYCODE_INTERNAL_BASE_URL.to_string()),
-        JoycodeNetwork::External => provider
+        JoycodeNetwork::External => Ok(provider
             .meta
             .as_ref()
             .and_then(|meta| meta.joycode_external_base_url.as_deref())
@@ -616,12 +629,7 @@ pub fn provider_base_url(provider: &Provider) -> Result<String, ProxyError> {
                     .map(|url| url.trim().trim_end_matches('/').to_string())
                     .filter(|url| url.starts_with("https://"))
             })
-            .ok_or_else(|| {
-                ProxyError::ConfigError(
-                    "JoyCode external gateway address is not available; deploy an official HTTPS address through CC_SWITCH_JOYCODE_EXTERNAL_BASE_URL"
-                        .to_string(),
-                )
-            }),
+            .unwrap_or_else(|| JOYCODE_EXTERNAL_BASE_URL.to_string())),
     }
 }
 
@@ -702,7 +710,21 @@ pub fn model_list_endpoint(provider: &Provider) -> Result<String, ProxyError> {
     })
 }
 
-pub fn auth_headers(pt_key: &str) -> Result<HeaderMap, ProxyError> {
+fn user_info_endpoint(provider: &Provider) -> Result<String, ProxyError> {
+    let base = provider_base_url(provider)?;
+    Ok(match provider_network(provider)? {
+        JoycodeNetwork::Internal => {
+            format!("{}/api/saas/user/v2/userInfo", base.trim_end_matches('/'))
+        }
+        JoycodeNetwork::External => sign_gateway_url(&base, "joycode_userInfo"),
+    })
+}
+
+pub fn auth_headers_with_context(
+    pt_key: &str,
+    login_type: Option<&str>,
+    tenant: Option<&str>,
+) -> Result<HeaderMap, ProxyError> {
     let pt_key = normalize_pt_key(pt_key);
     if pt_key.is_empty() {
         return Err(ProxyError::AuthError(
@@ -717,8 +739,22 @@ pub fn auth_headers(pt_key: &str) -> Result<HeaderMap, ProxyError> {
     );
     headers.insert(
         HeaderName::from_static("logintype"),
-        HeaderValue::from_static(login_type_for_pt_key(&pt_key)),
+        HeaderValue::from_str(
+            login_type
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| login_type_for_pt_key(&pt_key)),
+        )
+        .map_err(|error| ProxyError::AuthError(format!("Invalid JoyCode loginType: {error}")))?,
     );
+    if let Some(tenant) = tenant.map(str::trim).filter(|value| !value.is_empty()) {
+        headers.insert(
+            HeaderName::from_static("tenant"),
+            HeaderValue::from_str(tenant).map_err(|error| {
+                ProxyError::AuthError(format!("Invalid JoyCode tenant: {error}"))
+            })?,
+        );
+    }
     headers.insert(
         HeaderName::from_static("x-ms-client-request-id"),
         HeaderValue::from_str(&uuid::Uuid::new_v4().to_string()).expect("UUID is a valid header"),
@@ -736,6 +772,157 @@ pub fn auth_headers(pt_key: &str) -> Result<HeaderMap, ProxyError> {
         HeaderValue::from_static("application/json; charset=UTF-8"),
     );
     Ok(headers)
+}
+
+pub fn auth_headers_for_provider(
+    provider: &Provider,
+    pt_key: &str,
+) -> Result<HeaderMap, ProxyError> {
+    let meta = provider.meta.as_ref();
+    auth_headers_with_context(
+        pt_key,
+        meta.and_then(|meta| meta.joycode_login_type.as_deref()),
+        meta.and_then(|meta| meta.joycode_tenant.as_deref()),
+    )
+}
+
+fn response_text(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+async fn validate_credential_at(
+    endpoint: &str,
+    credential: &JoycodeCredential,
+) -> Result<JoycodeCredential, String> {
+    let headers = auth_headers_with_context(
+        &credential.pt_key,
+        credential.login_type.as_deref(),
+        credential.tenant.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
+    let response = crate::proxy::http_client::get()
+        .post(endpoint)
+        .headers(headers)
+        .timeout(Duration::from_secs(20))
+        .json(&json!({}))
+        .send()
+        .await
+        .map_err(|error| format!("JoyCode userInfo request failed: {error}"))?;
+    let status = response.status();
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("读取 JoyCode userInfo 响应失败：{error}"))?;
+    let code = payload
+        .get("code")
+        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()));
+    if code == Some(401) {
+        return Err("JoyCode 认证失败：ptKey 已失效，请重新登录 JoyCode 后再导入".to_string());
+    }
+    if !status.is_success() || !matches!(code, None | Some(0) | Some(200)) {
+        let message = payload
+            .get("msg")
+            .or_else(|| payload.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("未知错误");
+        return Err(format!("JoyCode userInfo 验证失败：{message}"));
+    }
+    let data = payload.get("data").unwrap_or(&payload);
+    if data.get("userId").is_none_or(Value::is_null) {
+        return Err("JoyCode userInfo 未返回有效用户，凭据不可用".to_string());
+    }
+    Ok(JoycodeCredential {
+        pt_key: response_text(data, &["ptKey", "pt_key"])
+            .map(|value| normalize_pt_key(&value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| normalize_pt_key(&credential.pt_key)),
+        login_type: response_text(data, &["loginType"]).or_else(|| credential.login_type.clone()),
+        tenant: response_text(data, &["tenant"]).or_else(|| credential.tenant.clone()),
+        master_base_url: response_text(data, &["masterBaseUrl", "base_url"])
+            .or_else(|| credential.master_base_url.clone()),
+        color_base_url: response_text(data, &["colorBaseUrl"])
+            .or_else(|| credential.color_base_url.clone()),
+    })
+}
+
+pub async fn validate_credential(
+    provider: &Provider,
+    credential: &JoycodeCredential,
+) -> Result<JoycodeCredential, String> {
+    let endpoint = user_info_endpoint(provider).map_err(|error| error.to_string())?;
+    if credential
+        .login_type
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        return validate_credential_at(&endpoint, credential).await;
+    }
+
+    let login_types: &[&str] = if normalize_pt_key(&credential.pt_key).starts_with("BJ.") {
+        &["ERP", "PIN_JD_CLOUD", "N_PIN_PC"]
+    } else {
+        &["PIN_JD_CLOUD", "N_PIN_PC", "ERP"]
+    };
+    let mut last_error = None;
+    for login_type in login_types {
+        let mut candidate = credential.clone();
+        candidate.login_type = Some((*login_type).to_string());
+        match validate_credential_at(&endpoint, &candidate).await {
+            Ok(validated) => return Ok(validated),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "JoyCode 认证类型自动检测失败".to_string()))
+}
+
+pub async fn validate_discovered_credential(
+    credential: &JoycodeCredential,
+) -> Result<JoycodeCredential, String> {
+    let mut endpoints = Vec::<String>::new();
+    if let Some(base) = credential
+        .color_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| base.starts_with("https://"))
+    {
+        endpoints.push(sign_gateway_url(base, "joycode_userInfo"));
+    }
+    if let Some(base) = credential
+        .master_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| base.starts_with("http://") || base.starts_with("https://"))
+    {
+        endpoints.push(format!(
+            "{}/api/saas/user/v2/userInfo",
+            base.trim_end_matches('/')
+        ));
+    }
+    if endpoints.is_empty() {
+        endpoints.push(format!(
+            "{JOYCODE_INTERNAL_BASE_URL}/api/saas/user/v2/userInfo"
+        ));
+        endpoints.push(sign_gateway_url(
+            JOYCODE_EXTERNAL_BASE_URL,
+            "joycode_userInfo",
+        ));
+    }
+    let mut last_error = None;
+    for endpoint in endpoints {
+        match validate_credential_at(&endpoint, credential).await {
+            Ok(credential) => return Ok(credential),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "未找到可用的 JoyCode 认证地址".to_string()))
 }
 
 pub fn decorate_body(body: &mut Value, wire_api: JoycodeWireApi) {
@@ -1273,7 +1460,7 @@ fn u64_field(value: &Value, keys: &[&str]) -> Option<u64> {
 
 pub async fn fetch_models(provider: &Provider, pt_key: &str) -> Result<Vec<JoycodeModel>, String> {
     let endpoint = model_list_endpoint(provider).map_err(|error| error.to_string())?;
-    let headers = auth_headers(pt_key).map_err(|error| error.to_string())?;
+    let headers = auth_headers_for_provider(provider, pt_key).map_err(|error| error.to_string())?;
     let response = crate::proxy::http_client::get()
         .post(&endpoint)
         .headers(headers)
@@ -1379,35 +1566,15 @@ pub async fn resolve_model(
         })
 }
 
-#[derive(Debug)]
-struct PtKeyCandidate {
-    value: String,
-    timestamp: String,
-}
-
-fn pt_key_timestamp(value: &str) -> String {
-    value
-        .split('.')
-        .nth(2)
-        .and_then(|part| part.find("202").map(|index| &part[index..]))
-        .filter(|timestamp| timestamp.len() >= 14)
-        .map(|timestamp| timestamp[..14].to_string())
-        .unwrap_or_else(|| "00000000000000".to_string())
-}
-
-/// Prefer the newest credential between the provider snapshot and official
-/// local JoyCode/JoyCoder storage. This keeps long-lived provider entries
-/// usable after the official client silently refreshes ptKey.
+/// Keep an explicitly configured credential stable. Local JoyCode state is
+/// imported only through the explicit UI action; silently comparing token
+/// timestamps is unsafe because current 32-byte credentials carry no timestamp.
 pub fn resolve_latest_pt_key(configured: &str) -> String {
     let configured = normalize_pt_key(configured);
-    match discover_latest_pt_key() {
-        // Prefer official local storage on equal/unknown timestamps as well;
-        // this mirrors the reference client's candidate order and lets an
-        // empty saved key be filled after the user logs in.
-        Some(local) if pt_key_timestamp(&local) >= pt_key_timestamp(&configured) => {
-            normalize_pt_key(&local)
-        }
-        _ => configured,
+    if configured.is_empty() {
+        discover_latest_pt_key().unwrap_or_default()
+    } else {
+        configured
     }
 }
 
@@ -1450,31 +1617,49 @@ fn collect_jetbrains_paths() -> Vec<std::path::PathBuf> {
     paths
 }
 
-/// Discover the newest JoyCode/JoyCoder credential from official local client
-/// storage. Databases are opened read-only and the credential is returned only
-/// to the explicit login/import command; it is never logged.
-pub fn discover_latest_pt_key() -> Option<String> {
-    let mut candidates = Vec::<PtKeyCandidate>::new();
-    let mut add = |value: String| {
-        let value = value.trim().to_string();
-        if !value.is_empty() {
-            candidates.push(PtKeyCandidate {
-                timestamp: pt_key_timestamp(&value),
-                value,
-            });
+fn credential_from_state(value: &Value) -> Option<JoycodeCredential> {
+    let login = value.pointer("/jdhLoginInfo")?;
+    let pt_key = login
+        .get("ptKey")
+        .or_else(|| login.get("pt_key"))?
+        .as_str()
+        .map(normalize_pt_key)
+        .filter(|value| !value.is_empty())?;
+    let text = |key: &str| {
+        login
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    Some(JoycodeCredential {
+        pt_key,
+        login_type: text("loginType"),
+        tenant: text("tenant"),
+        master_base_url: text("masterBaseUrl").or_else(|| text("base_url")),
+        color_base_url: text("colorBaseUrl"),
+    })
+}
+
+/// Discover credentials from the current JoyCode IDE first, then legacy
+/// JoyCoder/JetBrains stores. Databases are always opened read-only.
+pub fn discover_joycode_credentials() -> Vec<JoycodeCredential> {
+    let mut candidates = Vec::<JoycodeCredential>::new();
+    let mut add = |credential: JoycodeCredential| {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.pt_key == credential.pt_key)
+        {
+            candidates.push(credential);
         }
     };
-    for path in collect_jetbrains_paths() {
-        if let Some(value) = jetbrains_pt_key(&path) {
-            add(value);
-        }
-    }
     let mut databases = Vec::new();
     if let Some(home) = dirs::home_dir() {
         databases
-            .push(home.join("Library/Application Support/Code/User/globalStorage/state.vscdb"));
-        databases
             .push(home.join("Library/Application Support/JoyCode/User/globalStorage/state.vscdb"));
+        databases
+            .push(home.join("Library/Application Support/Code/User/globalStorage/state.vscdb"));
     }
     if let Some(appdata) = std::env::var_os("APPDATA") {
         let appdata = std::path::PathBuf::from(appdata);
@@ -1488,30 +1673,42 @@ pub fn discover_latest_pt_key() -> Option<String> {
         ) else {
             continue;
         };
-        let Ok(value) = connection.query_row(
-            "SELECT value FROM ItemTable WHERE key = 'JoyCoder.joycoder-fe'",
-            [],
-            |row| row.get::<_, String>(0),
-        ) else {
-            continue;
-        };
-        if let Some(pt_key) = serde_json::from_str::<Value>(&value)
-            .ok()
-            .and_then(|value| {
-                value
-                    .pointer("/jdhLoginInfo/ptKey")?
-                    .as_str()
-                    .map(str::to_string)
-            })
-        {
-            add(pt_key);
+        for storage_key in ["JoyCode.joycoder-editor", "JoyCoder.joycoder-fe"] {
+            let Ok(value) = connection.query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1",
+                [storage_key],
+                |row| row.get::<_, String>(0),
+            ) else {
+                continue;
+            };
+            if let Some(credential) = serde_json::from_str::<Value>(&value)
+                .ok()
+                .as_ref()
+                .and_then(credential_from_state)
+            {
+                add(credential);
+            }
         }
     }
-    candidates.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+    for path in collect_jetbrains_paths() {
+        if let Some(value) = jetbrains_pt_key(&path) {
+            add(JoycodeCredential {
+                pt_key: normalize_pt_key(&value),
+                login_type: Some(login_type_for_pt_key(&value).to_string()),
+                tenant: None,
+                master_base_url: None,
+                color_base_url: None,
+            });
+        }
+    }
     candidates
+}
+
+pub fn discover_latest_pt_key() -> Option<String> {
+    discover_joycode_credentials()
         .into_iter()
         .next()
-        .map(|candidate| candidate.value)
+        .map(|credential| credential.pt_key)
 }
 
 #[cfg(test)]
@@ -1533,6 +1730,48 @@ mod tests {
             "BJ.cookie"
         );
         assert_eq!(normalize_pt_key("\"BJ.quoted\""), "BJ.quoted");
+    }
+
+    #[test]
+    fn parses_current_joycode_login_state() {
+        let credential = credential_from_state(&json!({
+            "jdhLoginInfo": {
+                "pt_key": "current-token",
+                "ptKey": "current-token",
+                "loginType": "PIN_JD_CLOUD",
+                "tenant": "JD",
+                "masterBaseUrl": "http://internal.example",
+                "colorBaseUrl": "https://gateway.example"
+            }
+        }))
+        .unwrap();
+        assert_eq!(credential.pt_key, "current-token");
+        assert_eq!(credential.login_type.as_deref(), Some("PIN_JD_CLOUD"));
+        assert_eq!(credential.tenant.as_deref(), Some("JD"));
+        assert_eq!(
+            credential.color_base_url.as_deref(),
+            Some("https://gateway.example")
+        );
+    }
+
+    #[test]
+    fn explicit_credential_is_not_replaced_by_local_state() {
+        assert_eq!(resolve_latest_pt_key("BJ.manual"), "BJ.manual");
+    }
+
+    #[test]
+    fn auth_headers_preserve_validated_login_context() {
+        let headers =
+            auth_headers_with_context("current-token", Some("PIN_JD_CLOUD"), Some("JD")).unwrap();
+        assert_eq!(headers.get("ptkey").unwrap(), "current-token");
+        assert_eq!(headers.get("logintype").unwrap(), "PIN_JD_CLOUD");
+        assert_eq!(headers.get("tenant").unwrap(), "JD");
+    }
+
+    #[test]
+    fn login_type_fallback_keeps_legacy_erp_detection() {
+        assert_eq!(login_type_for_pt_key("BJ.legacy-token"), "ERP");
+        assert_eq!(login_type_for_pt_key("current-token"), "N_PIN_PC");
     }
 
     #[test]

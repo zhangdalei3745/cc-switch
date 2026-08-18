@@ -17,6 +17,14 @@ export interface JoycodeFetchedModel {
   maxOutputTokens?: number;
 }
 
+export interface JoycodeCredential {
+  ptKey: string;
+  loginType?: string;
+  tenant?: string;
+  masterBaseUrl?: string;
+  colorBaseUrl?: string;
+}
+
 export interface ModelFetchOptions {
   apiFormat?: string;
   requestHeaders?: Record<string, string>;
@@ -52,13 +60,37 @@ export async function fetchJoycodeModels(options: {
   network: "internal" | "external";
   externalBaseUrl?: string;
   ptKey: string;
+  loginType?: string;
+  tenant?: string;
 }): Promise<JoycodeFetchedModel[]> {
   return invoke("fetch_joycode_models", {
     providerId: options.providerId || "joycode-preview",
     network: options.network,
     externalBaseUrl: options.externalBaseUrl || null,
     ptKey: options.ptKey,
+    loginType: options.loginType || null,
+    tenant: options.tenant || null,
   });
+}
+
+export async function validateJoycodeCredential(options: {
+  network: "internal" | "external";
+  externalBaseUrl?: string;
+  ptKey: string;
+  loginType?: string;
+  tenant?: string;
+}): Promise<JoycodeCredential> {
+  return invoke("validate_joycode_credential", {
+    network: options.network,
+    externalBaseUrl: options.externalBaseUrl || null,
+    ptKey: options.ptKey,
+    loginType: options.loginType || null,
+    tenant: options.tenant || null,
+  });
+}
+
+export async function importJoycodeCredential(): Promise<JoycodeCredential | null> {
+  return invoke("import_joycode_credential");
 }
 
 export async function discoverJoycodePtKey(): Promise<string | null> {

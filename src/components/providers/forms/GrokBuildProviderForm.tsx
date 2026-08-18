@@ -54,6 +54,7 @@ import { resolveProviderIcon } from "@/utils/providerIcon";
 import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import {
   JoycodeConnectionFields,
+  type JoycodeCredentialMetadata,
   type JoycodeNetwork,
 } from "./JoycodeConnectionFields";
 
@@ -163,6 +164,12 @@ export function GrokBuildProviderForm({
   const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
     initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
   );
+  const [joycodeCredentialMetadata, setJoycodeCredentialMetadata] =
+    useState<JoycodeCredentialMetadata>(() => ({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    }));
   const selectedPreset = grokPresetEntries.find(
     (entry) => entry.id === selectedPresetId,
   )?.preset;
@@ -400,7 +407,13 @@ export function GrokBuildProviderForm({
       providerType: isJoycodeProvider ? "joycode" : undefined,
       joycodeNetwork: isJoycodeProvider ? joycodeNetwork : undefined,
       joycodeExternalBaseUrl: isJoycodeProvider
-        ? initialData?.meta?.joycodeExternalBaseUrl
+        ? joycodeCredentialMetadata.externalBaseUrl
+        : undefined,
+      joycodeLoginType: isJoycodeProvider
+        ? joycodeCredentialMetadata.loginType
+        : undefined,
+      joycodeTenant: isJoycodeProvider
+        ? joycodeCredentialMetadata.tenant
         : undefined,
       apiFormat,
       apiKeyField: anthropicAuthField,
@@ -460,7 +473,9 @@ export function GrokBuildProviderForm({
             network={joycodeNetwork}
             onNetworkChange={setJoycodeNetwork}
             credential={apiKey}
-            onCredential={(ptKey) => {
+            credentialMetadata={joycodeCredentialMetadata}
+            onCredential={(ptKey, metadata) => {
+              if (metadata) setJoycodeCredentialMetadata(metadata);
               setApiKey(ptKey);
               syncStructuredConfig({ apiKey: ptKey });
             }}

@@ -1483,6 +1483,8 @@ pub fn run() {
             commands::fetch_models_for_config,
             commands::fetch_joycode_models,
             commands::discover_joycode_pt_key,
+            commands::validate_joycode_credential,
+            commands::import_joycode_credential,
             commands::get_opencode_models,
             // ours: endpoint speed test + custom endpoint management
             commands::test_api_endpoints,

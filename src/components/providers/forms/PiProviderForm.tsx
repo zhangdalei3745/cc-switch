@@ -68,6 +68,7 @@ import type { ProviderCategory, ProviderMeta } from "@/types";
 import { translatePiProviderMutationError } from "@/utils/errorUtils";
 import {
   JoycodeConnectionFields,
+  type JoycodeCredentialMetadata,
   type JoycodeNetwork,
 } from "./JoycodeConnectionFields";
 
@@ -458,6 +459,12 @@ export function PiProviderForm({
   const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
     initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
   );
+  const [joycodeCredentialMetadata, setJoycodeCredentialMetadata] =
+    useState<JoycodeCredentialMetadata>(() => ({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    }));
   const isJoycodeProvider =
     initialData?.meta?.providerType === "joycode" ||
     selectedPreset?.providerType === "joycode";
@@ -1263,7 +1270,13 @@ export function PiProviderForm({
           providerType: isJoycodeProvider ? "joycode" : undefined,
           joycodeNetwork: isJoycodeProvider ? joycodeNetwork : undefined,
           joycodeExternalBaseUrl: isJoycodeProvider
-            ? initialData?.meta?.joycodeExternalBaseUrl
+            ? joycodeCredentialMetadata.externalBaseUrl
+            : undefined,
+          joycodeLoginType: isJoycodeProvider
+            ? joycodeCredentialMetadata.loginType
+            : undefined,
+          joycodeTenant: isJoycodeProvider
+            ? joycodeCredentialMetadata.tenant
             : undefined,
         } satisfies ProviderMeta,
       };
@@ -1345,7 +1358,11 @@ export function PiProviderForm({
             network={joycodeNetwork}
             onNetworkChange={setJoycodeNetwork}
             credential={apiKey}
-            onCredential={setApiKey}
+            credentialMetadata={joycodeCredentialMetadata}
+            onCredential={(ptKey, metadata) => {
+              if (metadata) setJoycodeCredentialMetadata(metadata);
+              setApiKey(ptKey);
+            }}
           />
         )}
 

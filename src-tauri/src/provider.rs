@@ -555,13 +555,19 @@ pub struct ProviderMeta {
     /// JoyCode network selector. Only `internal` and `external` are accepted.
     #[serde(rename = "joycodeNetwork", skip_serializing_if = "Option::is_none")]
     pub joycode_network: Option<String>,
-    /// Official external HTTPS gateway base. The public host is not derivable
-    /// from the reference implementation, so it must come from trusted config.
+    /// Official external HTTPS gateway base. Defaults to JoyCode's current
+    /// public gateway and may be overridden by trusted deployment config.
     #[serde(
         rename = "joycodeExternalBaseUrl",
         skip_serializing_if = "Option::is_none"
     )]
     pub joycode_external_base_url: Option<String>,
+    /// JoyCode login type returned by the official login callback.
+    #[serde(rename = "joycodeLoginType", skip_serializing_if = "Option::is_none")]
+    pub joycode_login_type: Option<String>,
+    /// JoyCode tenant returned by userInfo. Forwarded with authenticated requests.
+    #[serde(rename = "joycodeTenant", skip_serializing_if = "Option::is_none")]
+    pub joycode_tenant: Option<String>,
     /// GitHub Copilot 关联账号 ID（仅 github_copilot 供应商使用）
     /// 用于多账号支持，关联到特定的 GitHub 账号
     #[serde(rename = "githubAccountId", skip_serializing_if = "Option::is_none")]

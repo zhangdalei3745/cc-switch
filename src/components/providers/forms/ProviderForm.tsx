@@ -132,6 +132,7 @@ import { useHermesLiveProviderIds } from "@/hooks/useHermes";
 import { CODEX_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import {
   JoycodeConnectionFields,
+  type JoycodeCredentialMetadata,
   type JoycodeNetwork,
 } from "./JoycodeConnectionFields";
 
@@ -646,12 +647,23 @@ function ProviderFormFull({
   const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
     initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
   );
+  const [joycodeCredentialMetadata, setJoycodeCredentialMetadata] =
+    useState<JoycodeCredentialMetadata>(() => ({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    }));
   useEffect(() => {
     setJoycodeNetwork(
       initialData?.meta?.joycodeNetwork === "external"
         ? "external"
         : "internal",
     );
+    setJoycodeCredentialMetadata({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    });
   }, [appId, initialData]);
 
   const {
@@ -1041,7 +1053,8 @@ function ProviderFormFull({
   });
 
   const handleJoycodeCredential = useCallback(
-    (ptKey: string) => {
+    (ptKey: string, metadata?: JoycodeCredentialMetadata) => {
+      if (metadata) setJoycodeCredentialMetadata(metadata);
       if (appId === "codex") handleCodexApiKeyChange(ptKey);
       else if (appId === "gemini") handleGeminiApiKeyChange(ptKey);
       else if (appId === "opencode")
@@ -1781,7 +1794,13 @@ function ProviderFormFull({
       providerType,
       joycodeNetwork: isJoycodeProvider ? joycodeNetwork : undefined,
       joycodeExternalBaseUrl: isJoycodeProvider
-        ? initialData?.meta?.joycodeExternalBaseUrl
+        ? joycodeCredentialMetadata.externalBaseUrl
+        : undefined,
+      joycodeLoginType: isJoycodeProvider
+        ? joycodeCredentialMetadata.loginType
+        : undefined,
+      joycodeTenant: isJoycodeProvider
+        ? joycodeCredentialMetadata.tenant
         : undefined,
       authBinding: isCopilotProvider
         ? {
@@ -2230,6 +2249,7 @@ function ProviderFormFull({
                           ? hermesForm.hermesApiKey
                           : apiKey
               }
+              credentialMetadata={joycodeCredentialMetadata}
               onCredential={handleJoycodeCredential}
             />
           )}

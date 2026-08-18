@@ -61,6 +61,7 @@ import { useCopilotAuth, useCodexOauth, useXaiOauth } from "./hooks";
 import { isOAuthProviderType } from "@/config/constants";
 import {
   JoycodeConnectionFields,
+  type JoycodeCredentialMetadata,
   type JoycodeNetwork,
 } from "./JoycodeConnectionFields";
 
@@ -270,6 +271,12 @@ export function ClaudeDesktopProviderForm({
   const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
     initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
   );
+  const [joycodeCredentialMetadata, setJoycodeCredentialMetadata] =
+    useState<JoycodeCredentialMetadata>(() => ({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    }));
   const [apiKeyField, setApiKeyField] = useState<ApiKeyField>(() =>
     envString(initialData?.settingsConfig, "ANTHROPIC_API_KEY")
       ? "ANTHROPIC_API_KEY"
@@ -794,7 +801,13 @@ export function ClaudeDesktopProviderForm({
     meta.providerType = activeProviderType;
     meta.joycodeNetwork = isJoycodeProvider ? joycodeNetwork : undefined;
     meta.joycodeExternalBaseUrl = isJoycodeProvider
-      ? initialData?.meta?.joycodeExternalBaseUrl
+      ? joycodeCredentialMetadata.externalBaseUrl
+      : undefined;
+    meta.joycodeLoginType = isJoycodeProvider
+      ? joycodeCredentialMetadata.loginType
+      : undefined;
+    meta.joycodeTenant = isJoycodeProvider
+      ? joycodeCredentialMetadata.tenant
       : undefined;
     meta.authBinding =
       activeProviderType === "github_copilot"
@@ -890,7 +903,11 @@ export function ClaudeDesktopProviderForm({
             network={joycodeNetwork}
             onNetworkChange={setJoycodeNetwork}
             credential={apiKey}
-            onCredential={setApiKey}
+            credentialMetadata={joycodeCredentialMetadata}
+            onCredential={(ptKey, metadata) => {
+              if (metadata) setJoycodeCredentialMetadata(metadata);
+              setApiKey(ptKey);
+            }}
           />
         )}
 

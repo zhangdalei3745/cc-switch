@@ -164,6 +164,8 @@ pub async fn fetch_joycode_models(
     network: String,
     external_base_url: Option<String>,
     pt_key: String,
+    login_type: Option<String>,
+    tenant: Option<String>,
 ) -> Result<Vec<crate::proxy::providers::joycode::JoycodeModel>, String> {
     let provider = crate::provider::Provider {
         id: if provider_id.trim().is_empty() {
@@ -182,6 +184,8 @@ pub async fn fetch_joycode_models(
             provider_type: Some("joycode".to_string()),
             joycode_network: Some(network),
             joycode_external_base_url: external_base_url,
+            joycode_login_type: login_type,
+            joycode_tenant: tenant,
             ..Default::default()
         }),
         icon: Some("joycode".to_string()),
@@ -189,6 +193,79 @@ pub async fn fetch_joycode_models(
         in_failover_queue: false,
     };
     crate::proxy::providers::joycode::fetch_models(&provider, &pt_key).await
+}
+
+fn joycode_preview_provider(
+    network: String,
+    external_base_url: Option<String>,
+    login_type: Option<String>,
+    tenant: Option<String>,
+) -> crate::provider::Provider {
+    crate::provider::Provider {
+        id: "joycode-auth-preview".to_string(),
+        name: "JD Joycode".to_string(),
+        settings_config: serde_json::json!({}),
+        website_url: Some(crate::proxy::providers::joycode::JOYCODE_WEBSITE_URL.to_string()),
+        category: Some("cn_official".to_string()),
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(crate::provider::ProviderMeta {
+            provider_type: Some("joycode".to_string()),
+            joycode_network: Some(network),
+            joycode_external_base_url: external_base_url,
+            joycode_login_type: login_type,
+            joycode_tenant: tenant,
+            ..Default::default()
+        }),
+        icon: Some("joycode".to_string()),
+        icon_color: None,
+        in_failover_queue: false,
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn validate_joycode_credential(
+    network: String,
+    external_base_url: Option<String>,
+    pt_key: String,
+    login_type: Option<String>,
+    tenant: Option<String>,
+) -> Result<crate::proxy::providers::joycode::JoycodeCredential, String> {
+    let provider = joycode_preview_provider(
+        network,
+        external_base_url,
+        login_type.clone(),
+        tenant.clone(),
+    );
+    let credential = crate::proxy::providers::joycode::JoycodeCredential {
+        pt_key,
+        login_type,
+        tenant,
+        master_base_url: None,
+        color_base_url: None,
+    };
+    crate::proxy::providers::joycode::validate_credential(&provider, &credential).await
+}
+
+#[tauri::command]
+pub async fn import_joycode_credential(
+) -> Result<Option<crate::proxy::providers::joycode::JoycodeCredential>, String> {
+    let candidates =
+        tokio::task::spawn_blocking(crate::proxy::providers::joycode::discover_joycode_credentials)
+            .await
+            .map_err(|error| format!("JoyCode credential discovery failed: {error}"))?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut last_error = None;
+    for candidate in candidates {
+        match crate::proxy::providers::joycode::validate_discovered_credential(&candidate).await {
+            Ok(credential) => return Ok(Some(credential)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "未发现有效的 JoyCode 登录态".to_string()))
 }
 
 #[tauri::command]

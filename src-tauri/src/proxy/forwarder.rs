@@ -1985,7 +1985,7 @@ impl RequestForwarder {
             if !pt_key.is_empty() && !log_secrets.iter().any(|secret| secret == pt_key) {
                 log_secrets.push(pt_key.to_string());
             }
-            auth_headers = super::providers::joycode::auth_headers(pt_key)?
+            auth_headers = super::providers::joycode::auth_headers_for_provider(provider, pt_key)?
                 .iter()
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect();

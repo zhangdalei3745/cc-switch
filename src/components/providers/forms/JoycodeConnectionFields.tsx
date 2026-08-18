@@ -5,33 +5,44 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  discoverJoycodePtKey,
   fetchJoycodeModels,
+  importJoycodeCredential,
+  validateJoycodeCredential,
+  type JoycodeCredential,
   type JoycodeFetchedModel,
 } from "@/lib/api/model-fetch";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 export type JoycodeNetwork = "internal" | "external";
 
+export interface JoycodeCredentialMetadata {
+  loginType?: string;
+  tenant?: string;
+  externalBaseUrl?: string;
+}
+
 interface JoycodeConnectionFieldsProps {
   network: JoycodeNetwork;
   onNetworkChange: (network: JoycodeNetwork) => void;
   credential: string;
-  onCredential: (ptKey: string) => void;
+  credentialMetadata?: JoycodeCredentialMetadata;
+  onCredential: (ptKey: string, metadata?: JoycodeCredentialMetadata) => void;
 }
 
 /**
- * JoyCode 官网没有向第三方桌面应用提供认证回调。认证值由用户手动填写，
- * 也可以显式触发一次官方 JoyCode/JoyCoder 客户端本机凭据检测。
+ * JoyCode supports explicit manual credentials and importing the current
+ * official IDE login state. Both paths validate through userInfo before use.
  */
 export function JoycodeConnectionFields({
   network,
   onNetworkChange,
   credential,
+  credentialMetadata,
   onCredential,
 }: JoycodeConnectionFieldsProps) {
   const { t } = useTranslation();
-  const [detecting, setDetecting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [validating, setValidating] = useState(false);
   const [loadingModels, setLoadingModels] = useState(false);
   const [models, setModels] = useState<JoycodeFetchedModel[]>([]);
   const mountedRef = useRef(true);
@@ -43,14 +54,28 @@ export function JoycodeConnectionFields({
     [],
   );
 
-  const loadModels = async (ptKey = credential.trim()) => {
+  const metadataFromCredential = (
+    value: JoycodeCredential,
+  ): JoycodeCredentialMetadata => ({
+    loginType: value.loginType,
+    tenant: value.tenant,
+    externalBaseUrl: value.colorBaseUrl,
+  });
+
+  const loadModels = async (
+    ptKey = credential.trim(),
+    metadata = credentialMetadata,
+  ) => {
     const normalizedPtKey = ptKey.trim();
     if (!normalizedPtKey) return;
     setLoadingModels(true);
     try {
       const catalog = await fetchJoycodeModels({
         network,
+        externalBaseUrl: metadata?.externalBaseUrl,
         ptKey: normalizedPtKey,
+        loginType: metadata?.loginType,
+        tenant: metadata?.tenant,
       });
       setModels(catalog);
       toast.success(
@@ -71,18 +96,19 @@ export function JoycodeConnectionFields({
     }
   };
 
-  const detectCredential = async () => {
-    setDetecting(true);
+  const importCredential = async () => {
+    setImporting(true);
     try {
-      const ptKey = await discoverJoycodePtKey();
-      if (ptKey) {
-        onCredential(ptKey);
+      const imported = await importJoycodeCredential();
+      if (imported) {
+        const metadata = metadataFromCredential(imported);
+        onCredential(imported.ptKey, metadata);
         toast.success(
           t("joycode.credentialImported", {
             defaultValue: "已从 JoyCode 官方客户端导入认证凭据",
           }),
         );
-        await loadModels(ptKey);
+        await loadModels(imported.ptKey, metadata);
         return;
       }
       if (mountedRef.current) {
@@ -94,14 +120,50 @@ export function JoycodeConnectionFields({
         );
       }
     } catch (error) {
-      console.warn("[JoyCode] credential discovery failed", error);
+      console.warn("[JoyCode] credential import failed", error);
+      const detail = extractErrorMessage(error);
       toast.error(
-        t("joycode.credentialImportFailed", {
-          defaultValue: "JoyCode 凭据检测失败",
-        }),
+        detail ||
+          t("joycode.credentialImportFailed", {
+            defaultValue: "JoyCode 登录态导入失败",
+          }),
       );
     } finally {
-      if (mountedRef.current) setDetecting(false);
+      if (mountedRef.current) setImporting(false);
+    }
+  };
+
+  const validateManualCredential = async () => {
+    const ptKey = credential.trim();
+    if (!ptKey) return;
+    setValidating(true);
+    try {
+      const validated = await validateJoycodeCredential({
+        network,
+        externalBaseUrl: credentialMetadata?.externalBaseUrl,
+        ptKey,
+        loginType: credentialMetadata?.loginType,
+        tenant: credentialMetadata?.tenant,
+      });
+      const metadata = metadataFromCredential(validated);
+      onCredential(validated.ptKey, metadata);
+      toast.success(
+        t("joycode.credentialValidated", {
+          defaultValue: "JoyCode 认证验证成功",
+        }),
+      );
+      await loadModels(validated.ptKey, metadata);
+    } catch (error) {
+      console.warn("[JoyCode] credential validation failed", error);
+      const detail = extractErrorMessage(error);
+      toast.error(
+        detail ||
+          t("joycode.credentialValidationFailed", {
+            defaultValue: "JoyCode 认证验证失败",
+          }),
+      );
+    } finally {
+      if (mountedRef.current) setValidating(false);
     }
   };
 
@@ -127,17 +189,47 @@ export function JoycodeConnectionFields({
             {t("joycode.networkExternal", { defaultValue: "外网地址" })}
           </option>
         </select>
-        {network === "external" && (
-          <p className="text-xs text-amber-600 dark:text-amber-400">
-            {t("joycode.externalUnavailable", {
-              defaultValue:
-                "当前参考协议未提供可信的官方外网网关；该地址由部署方统一下发，用户无需填写。",
-            })}
-          </p>
-        )}
+        <p className="text-xs text-muted-foreground">
+          {network === "external"
+            ? t("joycode.externalAddressHint", {
+                defaultValue: "使用 JoyCode 官方 HTTPS 网关，无需填写地址。",
+              })
+            : t("joycode.internalAddressHint", {
+                defaultValue: "使用 JoyCode 内网服务地址，无需填写地址。",
+              })}
+        </p>
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-2 rounded-md border border-border/60 bg-background/60 p-3">
+        <div className="text-sm font-medium">
+          {t("joycode.importTitle", { defaultValue: "方式一：一键导入" })}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {t("joycode.importHint", {
+            defaultValue:
+              "读取并验证本机 JoyCode IDE 的当前登录态；未登录时请先在 JoyCode 中完成网页登录。",
+          })}
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={importing || validating || loadingModels}
+          onClick={() => void importCredential()}
+        >
+          {importing
+            ? t("joycode.importingCredential", {
+                defaultValue: "正在导入并验证…",
+              })
+            : t("joycode.importLocalCredential", {
+                defaultValue: "从 JoyCode 一键导入",
+              })}
+        </Button>
+      </div>
+
+      <div className="space-y-3 rounded-md border border-border/60 bg-background/60 p-3">
+        <div className="text-sm font-medium">
+          {t("joycode.manualTitle", { defaultValue: "方式二：手动配置" })}
+        </div>
         <Label htmlFor="joycode-pt-key">
           {t("joycode.ptKey", { defaultValue: "JoyCode ptKey" })}
         </Label>
@@ -148,39 +240,66 @@ export function JoycodeConnectionFields({
           value={credential}
           onChange={(event) => {
             setModels([]);
-            onCredential(event.target.value.trim());
+            onCredential(event.target.value, {
+              ...credentialMetadata,
+              loginType: undefined,
+              tenant: undefined,
+            });
           }}
           placeholder={t("joycode.ptKeyPlaceholder", {
             defaultValue: "手动粘贴 JoyCode ptKey",
           })}
         />
-        <p className="text-xs text-muted-foreground">
-          {t("joycode.manualCredentialHint", {
-            defaultValue:
-              "JoyCode 官网登录不会向 CC Switch 回传认证值，请手动填写 ptKey；出现 401 时需在官方客户端重新登录并复制最新值。",
-          })}
-        </p>
+        <div className="space-y-2">
+          <Label htmlFor="joycode-login-type">
+            {t("joycode.loginType", { defaultValue: "认证类型" })}
+          </Label>
+          <select
+            id="joycode-login-type"
+            value={credentialMetadata?.loginType ?? ""}
+            onChange={(event) => {
+              setModels([]);
+              onCredential(credential, {
+                ...credentialMetadata,
+                loginType: event.target.value || undefined,
+                tenant: undefined,
+              });
+            }}
+            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+          >
+            <option value="">
+              {t("joycode.loginTypeAuto", { defaultValue: "自动检测" })}
+            </option>
+            <option value="PIN_JD_CLOUD">PIN_JD_CLOUD</option>
+            <option value="N_PIN_PC">N_PIN_PC</option>
+            <option value="ERP">ERP</option>
+          </select>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={
+            importing || validating || loadingModels || !credential.trim()
+          }
+          onClick={() => void validateManualCredential()}
+        >
+          {validating
+            ? t("joycode.validatingCredential", {
+                defaultValue: "正在验证…",
+              })
+            : t("joycode.validateCredential", {
+                defaultValue: "验证认证并获取模型",
+              })}
+        </Button>
       </div>
 
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
-          variant="outline"
-          disabled={detecting}
-          onClick={() => void detectCredential()}
-        >
-          {detecting
-            ? t("joycode.detectingCredential", {
-                defaultValue: "检测本机凭据…",
-              })
-            : t("joycode.detectLocalCredential", {
-                defaultValue: "从本机 JoyCode 导入",
-              })}
-        </Button>
-        <Button
-          type="button"
           variant="ghost"
-          disabled={detecting || loadingModels || !credential.trim()}
+          disabled={
+            importing || validating || loadingModels || !credential.trim()
+          }
           onClick={() => void loadModels()}
         >
           {loadingModels
