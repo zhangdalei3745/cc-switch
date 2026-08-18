@@ -1297,9 +1297,7 @@ pub async fn fetch_models(provider: &Provider, pt_key: &str) -> Result<Vec<Joyco
         )
     })?;
     if !status.is_success() {
-        if let Err(error) = parse_model_catalog(&payload) {
-            return Err(error);
-        }
+        parse_model_catalog(&payload)?;
         return Err(format!("JoyCode 模型请求失败（HTTP {}）", status.as_u16()));
     }
     let models = parse_model_catalog(&payload)?;
