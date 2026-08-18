@@ -9,6 +9,7 @@ import {
   fetchJoycodeModels,
   type JoycodeFetchedModel,
 } from "@/lib/api/model-fetch";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export type JoycodeNetwork = "internal" | "external";
 
@@ -60,11 +61,11 @@ export function JoycodeConnectionFields({
       );
     } catch (error) {
       console.warn("[JoyCode] model discovery failed", error);
-      toast.error(
-        t("providerForm.fetchModelsFailed", {
-          defaultValue: "获取模型列表失败",
-        }),
-      );
+      const title = t("providerForm.fetchModelsFailed", {
+        defaultValue: "获取模型列表失败",
+      });
+      const detail = extractErrorMessage(error);
+      toast.error(detail ? `${title}：${detail}` : title);
     } finally {
       if (mountedRef.current) setLoadingModels(false);
     }
@@ -156,7 +157,7 @@ export function JoycodeConnectionFields({
         <p className="text-xs text-muted-foreground">
           {t("joycode.manualCredentialHint", {
             defaultValue:
-              "JoyCode 官网登录不会向 CC Switch 回传认证值，请手动填写 ptKey。",
+              "JoyCode 官网登录不会向 CC Switch 回传认证值，请手动填写 ptKey；出现 401 时需在官方客户端重新登录并复制最新值。",
           })}
         </p>
       </div>

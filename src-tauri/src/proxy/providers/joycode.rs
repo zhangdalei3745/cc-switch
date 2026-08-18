@@ -633,6 +633,25 @@ pub fn login_type_for_pt_key(pt_key: &str) -> &'static str {
     }
 }
 
+/// Accept the raw token as well as the common forms copied from cookie/config
+/// views. Only the token value is forwarded to JoyCode.
+pub fn normalize_pt_key(value: &str) -> String {
+    let trimmed = value.trim().trim_matches(['\'', '"']);
+    let candidate = trimmed
+        .split(';')
+        .find_map(|part| {
+            let part = part.trim();
+            let (name, value) = part.split_once('=')?;
+            matches!(
+                name.trim().to_ascii_lowercase().as_str(),
+                "ptkey" | "pt_key"
+            )
+            .then(|| value.trim().trim_matches(['\'', '"']))
+        })
+        .unwrap_or(trimmed);
+    candidate.to_string()
+}
+
 pub fn sign_gateway_url_at(base_url: &str, function_id: &str, timestamp_ms: u128) -> String {
     type HmacSha256 = Hmac<Sha256>;
     let message = format!("joycode_ide&{function_id}&{timestamp_ms}");
@@ -684,7 +703,7 @@ pub fn model_list_endpoint(provider: &Provider) -> Result<String, ProxyError> {
 }
 
 pub fn auth_headers(pt_key: &str) -> Result<HeaderMap, ProxyError> {
-    let pt_key = pt_key.trim();
+    let pt_key = normalize_pt_key(pt_key);
     if pt_key.is_empty() {
         return Err(ProxyError::AuthError(
             "JoyCode ptKey is empty; log in with the official JoyCode client first".to_string(),
@@ -693,12 +712,12 @@ pub fn auth_headers(pt_key: &str) -> Result<HeaderMap, ProxyError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         HeaderName::from_static("ptkey"),
-        HeaderValue::from_str(pt_key)
+        HeaderValue::from_str(&pt_key)
             .map_err(|error| ProxyError::AuthError(format!("Invalid JoyCode ptKey: {error}")))?,
     );
     headers.insert(
         HeaderName::from_static("logintype"),
-        HeaderValue::from_static(login_type_for_pt_key(pt_key)),
+        HeaderValue::from_static(login_type_for_pt_key(&pt_key)),
     );
     headers.insert(
         HeaderName::from_static("x-ms-client-request-id"),
@@ -1158,7 +1177,7 @@ pub fn prompt_cache_key(
 }
 
 fn credential_fingerprint(pt_key: &str) -> String {
-    Sha256::digest(pt_key.as_bytes())
+    Sha256::digest(normalize_pt_key(pt_key).as_bytes())
         .iter()
         .take(16)
         .map(|byte| format!("{byte:02x}"))
@@ -1166,8 +1185,24 @@ fn credential_fingerprint(pt_key: &str) -> String {
 }
 
 pub fn parse_model_catalog(payload: &Value) -> Result<Vec<JoycodeModel>, String> {
-    if payload.get("code").and_then(Value::as_i64) == Some(401) {
-        return Err("JoyCode credential expired; log in again".to_string());
+    let response_code = payload.get("code").and_then(|code| {
+        code.as_i64()
+            .or_else(|| code.as_str().and_then(|code| code.parse().ok()))
+    });
+    if response_code == Some(401) {
+        return Err(
+            "JoyCode 认证失败：账号未登录或 ptKey 已失效，请重新登录 JoyCode 并填写最新 ptKey"
+                .to_string(),
+        );
+    }
+    if let Some(code) = response_code.filter(|code| *code != 0 && *code != 200) {
+        let message = payload
+            .get("msg")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .unwrap_or("未知错误");
+        return Err(format!("JoyCode 返回错误 {code}：{message}"));
     }
     let entries = payload
         .get("data")
@@ -1251,12 +1286,21 @@ pub async fn fetch_models(provider: &Provider, pt_key: &str) -> Result<Vec<Joyco
         .await
         .map_err(|error| format!("JoyCode model request failed: {error}"))?;
     let status = response.status();
-    let payload: Value = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .map_err(|error| format!("Invalid JoyCode model response: {error}"))?;
+        .map_err(|error| format!("读取 JoyCode 模型响应失败：{error}"))?;
+    let payload: Value = serde_json::from_str(&response_text).map_err(|_| {
+        format!(
+            "JoyCode 模型接口返回了非 JSON 响应（HTTP {}）",
+            status.as_u16()
+        )
+    })?;
     if !status.is_success() {
-        return Err(format!("JoyCode model request failed with HTTP {status}"));
+        if let Err(error) = parse_model_catalog(&payload) {
+            return Err(error);
+        }
+        return Err(format!("JoyCode 模型请求失败（HTTP {}）", status.as_u16()));
     }
     let models = parse_model_catalog(&payload)?;
     cache_models(&catalog_scope(provider, pt_key), &models);
@@ -1269,7 +1313,7 @@ fn catalog_scope(provider: &Provider, pt_key: &str) -> String {
         .as_ref()
         .and_then(|meta| meta.joycode_network.as_deref())
         .unwrap_or("internal");
-    let digest = Sha256::digest(pt_key.as_bytes());
+    let digest = Sha256::digest(normalize_pt_key(pt_key).as_bytes());
     let account = digest
         .iter()
         .take(8)
@@ -1357,12 +1401,14 @@ fn pt_key_timestamp(value: &str) -> String {
 /// local JoyCode/JoyCoder storage. This keeps long-lived provider entries
 /// usable after the official client silently refreshes ptKey.
 pub fn resolve_latest_pt_key(configured: &str) -> String {
-    let configured = configured.trim().to_string();
+    let configured = normalize_pt_key(configured);
     match discover_latest_pt_key() {
         // Prefer official local storage on equal/unknown timestamps as well;
         // this mirrors the reference client's candidate order and lets an
         // empty saved key be filled after the user logs in.
-        Some(local) if pt_key_timestamp(&local) >= pt_key_timestamp(&configured) => local,
+        Some(local) if pt_key_timestamp(&local) >= pt_key_timestamp(&configured) => {
+            normalize_pt_key(&local)
+        }
         _ => configured,
     }
 }
@@ -1478,6 +1524,29 @@ mod tests {
     fn login_type_follows_pt_key_prefix() {
         assert_eq!(login_type_for_pt_key("BJ.example"), "ERP");
         assert_eq!(login_type_for_pt_key("other"), "N_PIN_PC");
+    }
+
+    #[test]
+    fn normalizes_pt_key_copied_from_cookie_or_config_views() {
+        assert_eq!(normalize_pt_key("  BJ.raw  "), "BJ.raw");
+        assert_eq!(normalize_pt_key("ptKey=BJ.config"), "BJ.config");
+        assert_eq!(
+            normalize_pt_key("foo=bar; pt_key=BJ.cookie; path=/"),
+            "BJ.cookie"
+        );
+        assert_eq!(normalize_pt_key("\"BJ.quoted\""), "BJ.quoted");
+    }
+
+    #[test]
+    fn model_catalog_reports_expired_credentials_actionably() {
+        let error = parse_model_catalog(&json!({
+            "code": "401",
+            "data": null,
+            "msg": "账号未登录"
+        }))
+        .unwrap_err();
+        assert!(error.contains("ptKey 已失效"));
+        assert!(error.contains("最新 ptKey"));
     }
 
     #[test]

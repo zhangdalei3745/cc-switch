@@ -1,12 +1,17 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JoycodeConnectionFields } from "@/components/providers/forms/JoycodeConnectionFields";
 
 const modelFetchMocks = vi.hoisted(() => ({
   discoverJoycodePtKey: vi.fn(),
   fetchJoycodeModels: vi.fn(),
+}));
+const toastMocks = vi.hoisted(() => ({
+  error: vi.fn(),
+  info: vi.fn(),
+  success: vi.fn(),
 }));
 
 vi.mock("@/lib/api/model-fetch", () => ({
@@ -14,13 +19,7 @@ vi.mock("@/lib/api/model-fetch", () => ({
   fetchJoycodeModels: modelFetchMocks.fetchJoycodeModels,
 }));
 
-vi.mock("sonner", () => ({
-  toast: {
-    error: vi.fn(),
-    info: vi.fn(),
-    success: vi.fn(),
-  },
-}));
+vi.mock("sonner", () => ({ toast: toastMocks }));
 
 function ControlledFields({
   onCredential = vi.fn(),
@@ -42,6 +41,10 @@ function ControlledFields({
 }
 
 describe("JoycodeConnectionFields", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("uses a manual password field instead of opening a web login", () => {
     const onCredential = vi.fn();
     render(<ControlledFields onCredential={onCredential} />);
@@ -86,5 +89,22 @@ describe("JoycodeConnectionFields", () => {
       ptKey: "BJ.local-key",
     });
     expect(await screen.findByText("joy-model")).toBeInTheDocument();
+  });
+
+  it("shows the actionable backend reason when model discovery fails", async () => {
+    const user = userEvent.setup();
+    modelFetchMocks.fetchJoycodeModels.mockRejectedValue(
+      "JoyCode 认证失败：账号未登录或 ptKey 已失效，请重新登录 JoyCode 并填写最新 ptKey",
+    );
+    render(<ControlledFields />);
+
+    await user.type(screen.getByLabelText("JoyCode ptKey"), "BJ.expired-key");
+    await user.click(screen.getByRole("button", { name: "获取模型" }));
+
+    await waitFor(() =>
+      expect(toastMocks.error).toHaveBeenCalledWith(
+        expect.stringContaining("ptKey 已失效"),
+      ),
+    );
   });
 });
