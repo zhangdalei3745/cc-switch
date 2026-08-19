@@ -4419,7 +4419,7 @@ impl ProviderService {
 
             if let Some(config) = provider
                 .settings_config
-                .get_mut("config")
+                .get("config")
                 .and_then(Value::as_str)
                 .map(str::to_string)
             {
