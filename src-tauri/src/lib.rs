@@ -1248,6 +1248,18 @@ pub fn run() {
 
                 initialize_common_config_snippets(&state);
 
+                match crate::services::provider::ProviderService::migrate_joycode_model_catalogs(
+                    &state,
+                )
+                .await
+                {
+                    Ok(count) if count > 0 => {
+                        log::info!("✓ Migrated JoyCode model mappings for {count} provider(s)")
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("✗ Failed to migrate JoyCode model mappings: {error}"),
+                }
+
                 // 检查 settings 表中的代理状态，自动恢复代理服务
                 restore_proxy_state_on_startup(&state).await;
 

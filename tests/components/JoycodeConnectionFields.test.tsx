@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JoycodeConnectionFields } from "@/components/providers/forms/JoycodeConnectionFields";
 
@@ -25,8 +25,12 @@ vi.mock("sonner", () => ({ toast: toastMocks }));
 
 function ControlledFields({
   onCredential = vi.fn(),
+  onModelsLoaded,
 }: {
   onCredential?: (credential: string) => void;
+  onModelsLoaded?: ComponentProps<
+    typeof JoycodeConnectionFields
+  >["onModelsLoaded"];
 }) {
   const [credential, setCredential] = useState("");
   return (
@@ -38,6 +42,7 @@ function ControlledFields({
         setCredential(value);
         onCredential(value);
       }}
+      onModelsLoaded={onModelsLoaded}
     />
   );
 }
@@ -69,6 +74,7 @@ describe("JoycodeConnectionFields", () => {
   it("keeps explicit local-client import as an optional path", async () => {
     const user = userEvent.setup();
     const onCredential = vi.fn();
+    const onModelsLoaded = vi.fn();
     modelFetchMocks.importJoycodeCredential.mockResolvedValue({
       ptKey: "BJ.local-key",
       loginType: "N_PIN_PC",
@@ -81,7 +87,12 @@ describe("JoycodeConnectionFields", () => {
         wireApi: "responses",
       },
     ]);
-    render(<ControlledFields onCredential={onCredential} />);
+    render(
+      <ControlledFields
+        onCredential={onCredential}
+        onModelsLoaded={onModelsLoaded}
+      />,
+    );
 
     await user.click(
       screen.getByRole("button", { name: "从 JoyCode 一键导入" }),
@@ -97,6 +108,13 @@ describe("JoycodeConnectionFields", () => {
       tenant: "joycode",
       externalBaseUrl: undefined,
     });
+    expect(onModelsLoaded).toHaveBeenCalledWith([
+      {
+        id: "joy-model",
+        ownedBy: "joycode",
+        wireApi: "responses",
+      },
+    ]);
     expect(await screen.findByText("joy-model")).toBeInTheDocument();
   });
 

@@ -143,8 +143,15 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     config: generateThirdPartyConfig(
       "JD Joycode",
       "http://joycode-api-saas.jd.com",
-      "joycode",
+      "GPT-5.6 Sol",
     ),
+    modelCatalog: modelCatalog([
+      {
+        model: "GPT-5.6 Sol",
+        displayName: "GPT-5.6 Sol",
+        contextWindow: 200000,
+      },
+    ]),
     apiFormat: "openai_responses",
     category: "cn_official",
     icon: "joycode",

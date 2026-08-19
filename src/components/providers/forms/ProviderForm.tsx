@@ -135,6 +135,7 @@ import {
   type JoycodeCredentialMetadata,
   type JoycodeNetwork,
 } from "./JoycodeConnectionFields";
+import type { JoycodeFetchedModel } from "@/lib/api/model-fetch";
 
 type PresetEntry = {
   id: string;
@@ -1073,6 +1074,62 @@ function ProviderFormFull({
       opencodeForm,
       openclawForm,
     ],
+  );
+
+  const handleJoycodeModelsLoaded = useCallback(
+    (models: JoycodeFetchedModel[]) => {
+      if (models.length === 0) return;
+
+      const latestMatching = (token: string) =>
+        models
+          .filter((model) => model.id.toLowerCase().includes(token))
+          .sort((left, right) =>
+            right.id.localeCompare(left.id, undefined, { numeric: true }),
+          )[0];
+
+      if (appId === "claude") {
+        const sonnet = latestMatching("sonnet");
+        const opus = latestMatching("opus");
+        const haiku = latestMatching("haiku") ?? sonnet;
+        const fallback = sonnet ?? opus ?? models[0];
+        const selectedSonnet = sonnet ?? fallback;
+        const selectedOpus = opus ?? selectedSonnet;
+        const selectedHaiku = haiku ?? selectedSonnet;
+
+        handleModelChange("ANTHROPIC_MODEL", selectedSonnet.id);
+        handleModelChange("ANTHROPIC_DEFAULT_HAIKU_MODEL", selectedHaiku.id);
+        handleModelChange(
+          "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+          selectedHaiku.id,
+        );
+        handleModelChange("ANTHROPIC_DEFAULT_SONNET_MODEL", selectedSonnet.id);
+        handleModelChange(
+          "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+          selectedSonnet.id,
+        );
+        handleModelChange("ANTHROPIC_DEFAULT_OPUS_MODEL", selectedOpus.id);
+        handleModelChange("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", selectedOpus.id);
+        return;
+      }
+
+      if (appId === "codex") {
+        setCodexCatalogModels(
+          models.map((model) => ({
+            model: model.id,
+            displayName: model.id,
+            contextWindow: model.contextWindow,
+          })),
+        );
+        const defaultModel =
+          models
+            .filter((model) => model.wireApi === "responses")
+            .sort((left, right) =>
+              right.id.localeCompare(left.id, undefined, { numeric: true }),
+            )[0] ?? models[0];
+        handleCodexModelChange(defaultModel.id);
+      }
+    },
+    [appId, handleCodexModelChange, handleModelChange, setCodexCatalogModels],
   );
   const {
     data: hermesLiveProviderIds = [],
@@ -2234,6 +2291,7 @@ function ProviderFormFull({
 
           {isJoycodeProvider && (
             <JoycodeConnectionFields
+              providerId={providerId}
               network={joycodeNetwork}
               onNetworkChange={setJoycodeNetwork}
               credential={
@@ -2251,6 +2309,7 @@ function ProviderFormFull({
               }
               credentialMetadata={joycodeCredentialMetadata}
               onCredential={handleJoycodeCredential}
+              onModelsLoaded={handleJoycodeModelsLoaded}
             />
           )}
 

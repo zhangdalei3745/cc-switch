@@ -22,11 +22,13 @@ export interface JoycodeCredentialMetadata {
 }
 
 interface JoycodeConnectionFieldsProps {
+  providerId?: string;
   network: JoycodeNetwork;
   onNetworkChange: (network: JoycodeNetwork) => void;
   credential: string;
   credentialMetadata?: JoycodeCredentialMetadata;
   onCredential: (ptKey: string, metadata?: JoycodeCredentialMetadata) => void;
+  onModelsLoaded?: (models: JoycodeFetchedModel[]) => void;
 }
 
 /**
@@ -34,11 +36,13 @@ interface JoycodeConnectionFieldsProps {
  * official IDE login state. Both paths validate through userInfo before use.
  */
 export function JoycodeConnectionFields({
+  providerId,
   network,
   onNetworkChange,
   credential,
   credentialMetadata,
   onCredential,
+  onModelsLoaded,
 }: JoycodeConnectionFieldsProps) {
   const { t } = useTranslation();
   const [importing, setImporting] = useState(false);
@@ -71,6 +75,7 @@ export function JoycodeConnectionFields({
     setLoadingModels(true);
     try {
       const catalog = await fetchJoycodeModels({
+        providerId,
         network,
         externalBaseUrl: metadata?.externalBaseUrl,
         ptKey: normalizedPtKey,
@@ -78,6 +83,7 @@ export function JoycodeConnectionFields({
         tenant: metadata?.tenant,
       });
       setModels(catalog);
+      onModelsLoaded?.(catalog);
       toast.success(
         t("providerForm.fetchModelsSuccess", {
           count: catalog.length,

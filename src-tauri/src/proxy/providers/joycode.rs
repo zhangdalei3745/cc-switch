@@ -83,6 +83,51 @@ pub struct JoycodeModel {
     pub max_output_tokens: Option<u64>,
 }
 
+/// Choose the newest catalog entry for a model family. JoyCode keeps the
+/// version in the public model id, so natural numeric ordering is sufficient
+/// for the current `Claude-*-x.y-hq` / `GPT-x.y` naming scheme.
+fn latest_family_model(models: &[JoycodeModel], family: &str) -> Option<JoycodeModel> {
+    let family = family.to_ascii_lowercase();
+    let mut candidates: Vec<_> = models
+        .iter()
+        .filter(|model| model.id.to_ascii_lowercase().contains(&family))
+        .cloned()
+        .collect();
+    candidates.sort_by(|left, right| right.id.cmp(&left.id));
+    candidates.into_iter().next()
+}
+
+/// Build Claude Code's three stable role mappings from the live JoyCode
+/// catalog. Some JoyCode accounts do not expose a Haiku model; in that case
+/// auxiliary Haiku traffic deliberately falls back to Sonnet instead of an
+/// unrelated model/protocol.
+pub fn claude_role_models(
+    models: &[JoycodeModel],
+) -> Option<(JoycodeModel, JoycodeModel, JoycodeModel)> {
+    let sonnet = latest_family_model(models, "sonnet")
+        .or_else(|| latest_family_model(models, "opus"))
+        .or_else(|| models.first().cloned())?;
+    let haiku = latest_family_model(models, "haiku").unwrap_or_else(|| sonnet.clone());
+    let opus = latest_family_model(models, "opus").unwrap_or_else(|| sonnet.clone());
+    Some((haiku, sonnet, opus))
+}
+
+/// Prefer the newest native Responses model as Codex's default. The complete
+/// catalog is still projected, so users can select Chat/Anthropic-backed
+/// models and let the proxy bridge their wire protocols.
+pub fn codex_default_model(models: &[JoycodeModel]) -> Option<JoycodeModel> {
+    let mut responses: Vec<_> = models
+        .iter()
+        .filter(|model| model.wire_api == JoycodeWireApi::Responses)
+        .cloned()
+        .collect();
+    responses.sort_by(|left, right| right.id.cmp(&left.id));
+    responses
+        .into_iter()
+        .next()
+        .or_else(|| models.first().cloned())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JoycodeCredential {
@@ -2747,6 +2792,30 @@ mod tests {
         assert_eq!(models[2].wire_api, JoycodeWireApi::Responses);
         assert_eq!(models[2].context_window, Some(1000));
         assert_eq!(models[2].max_output_tokens, Some(120));
+    }
+
+    #[test]
+    fn catalog_builds_distinct_claude_roles_and_codex_default() {
+        let model = |id: &str, wire_api| JoycodeModel {
+            id: id.to_string(),
+            owned_by: "joycode".to_string(),
+            wire_api,
+            context_window: Some(200_000),
+            max_output_tokens: Some(64_000),
+        };
+        let models = vec![
+            model("Claude-Opus-4.6-hq", JoycodeWireApi::Anthropic),
+            model("Claude-Opus-4.8-hq", JoycodeWireApi::Anthropic),
+            model("Claude-Sonnet-4.6-hq", JoycodeWireApi::Anthropic),
+            model("GPT-5.6 Sol", JoycodeWireApi::Responses),
+            model("GLM-5.3", JoycodeWireApi::Chat),
+        ];
+
+        let (haiku, sonnet, opus) = claude_role_models(&models).unwrap();
+        assert_eq!(haiku.id, "Claude-Sonnet-4.6-hq");
+        assert_eq!(sonnet.id, "Claude-Sonnet-4.6-hq");
+        assert_eq!(opus.id, "Claude-Opus-4.8-hq");
+        assert_eq!(codex_default_model(&models).unwrap().id, "GPT-5.6 Sol");
     }
 
     #[test]
