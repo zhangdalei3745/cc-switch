@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex as AsyncMutex;
 
 pub const JOYCODE_INTERNAL_BASE_URL: &str = "http://joycode-api-saas.jd.com";
 pub const JOYCODE_EXTERNAL_BASE_URL: &str = "https://api-ai.jd.com";
@@ -28,11 +29,17 @@ pub const JOYCODE_EXTERNAL_BASE_URL_ENV: &str = "CC_SWITCH_JOYCODE_EXTERNAL_BASE
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const RESPONSE_SESSION_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const RESPONSE_SESSION_LIMIT: usize = 256;
+const RUNTIME_TOKEN_WAIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const RUNTIME_POLL_MIN_DELAY: Duration = Duration::from_secs(5);
+const RUNTIME_POLL_MAX_DELAY: Duration = Duration::from_secs(30);
+const RUNTIME_RECOVERY_LIMIT: usize = 3;
+const RUNTIME_READY_STATUS: &str = "READY";
+const RUNTIME_BYPASS_TOKEN: &str = "mt_ready_bypass";
 
 // Kept byte-for-byte compatible with the current JoyCode IDE implementation.
 const JOYCODE_GATEWAY_SIGNING_KEY: &[u8] = b"0691a3f0b37b4a85aeb63ad0fc7db3ed";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JoycodeNetwork {
     Internal,
@@ -125,6 +132,126 @@ static RESPONSE_SESSIONS: OnceLock<Mutex<HashMap<ResponseSessionKey, ResponseSes
     OnceLock::new();
 static CHAT_CACHE_KEY_REJECTED: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RuntimeTokenKey {
+    provider_id: String,
+    network: JoycodeNetwork,
+    account_scope: String,
+    model: String,
+    chat_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRuntimeToken {
+    token: String,
+    expire_at: Option<String>,
+    remaining_request_count: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeTokenSlot {
+    active: Option<CachedRuntimeToken>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoycodeRuntimeLease {
+    key: RuntimeTokenKey,
+    token: String,
+}
+
+impl JoycodeRuntimeLease {
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeSnapshot {
+    token: Option<String>,
+    token_status: Option<String>,
+    expire_at: Option<String>,
+    next_poll_at: Option<String>,
+    remaining_request_count: Option<u64>,
+}
+
+#[derive(Debug)]
+struct RuntimeCallError {
+    code: Option<String>,
+    status: u16,
+}
+
+impl RuntimeCallError {
+    fn normalized_code(&self) -> Option<String> {
+        self.code
+            .as_deref()
+            .map(str::trim)
+            .filter(|code| !code.is_empty())
+            .map(|code| code.to_ascii_uppercase())
+    }
+
+    fn is_auth(&self) -> bool {
+        matches!(
+            self.normalized_code().as_deref(),
+            Some("401" | "UNAUTHORIZED")
+        ) || self.status == 401
+    }
+
+    fn is_bypass(&self) -> bool {
+        matches!(
+            self.normalized_code().as_deref(),
+            Some("503001" | "MODEL_RUNTIME_JIMDB_UNAVAILABLE" | "MODEL_TOKEN_READY_BYPASS")
+        )
+    }
+
+    fn should_requeue(&self) -> bool {
+        matches!(
+            self.normalized_code().as_deref(),
+            Some(
+                "400001"
+                    | "400002"
+                    | "400003"
+                    | "400004"
+                    | "MODEL_TOKEN_INVALID"
+                    | "MODEL_TOKEN_MISSING"
+                    | "MODEL_TOKEN_EXPIRED"
+                    | "MODEL_TOKEN_CHAT_MISSING"
+            )
+        )
+    }
+
+    fn should_continue_queue(&self) -> bool {
+        matches!(
+            self.normalized_code().as_deref(),
+            Some("409002" | "409003" | "MODEL_TOKEN_NOT_READY" | "MODEL_SESSION_PREPARE_CONFLICT")
+        )
+    }
+
+    fn into_proxy_error(self) -> ProxyError {
+        if self.is_auth() {
+            return ProxyError::AuthError(
+                "JoyCode credential expired while preparing the model runtime".to_string(),
+            );
+        }
+        let code = self
+            .normalized_code()
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+        let status = if matches!(code.as_str(), "429001" | "MODEL_QUEUE_FULL") {
+            429
+        } else if self.status >= 400 {
+            self.status
+        } else {
+            503
+        };
+        ProxyError::UpstreamError {
+            status,
+            body: Some(format!("JoyCode model runtime error: {code}")),
+        }
+    }
+}
+
+type RuntimeSlotMap = HashMap<RuntimeTokenKey, Arc<AsyncMutex<RuntimeTokenSlot>>>;
+static RUNTIME_TOKEN_SLOTS: OnceLock<AsyncMutex<RuntimeSlotMap>> = OnceLock::new();
+
 fn response_sessions() -> &'static Mutex<HashMap<ResponseSessionKey, ResponseSession>> {
     RESPONSE_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -135,6 +262,10 @@ fn catalogs() -> &'static RwLock<HashMap<String, CachedCatalog>> {
 
 fn rejected_chat_cache_keys() -> &'static RwLock<HashSet<String>> {
     CHAT_CACHE_KEY_REJECTED.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+fn runtime_token_slots() -> &'static AsyncMutex<RuntimeSlotMap> {
+    RUNTIME_TOKEN_SLOTS.get_or_init(|| AsyncMutex::new(HashMap::new()))
 }
 
 fn chat_cache_capability_key(provider: &Provider, model: &str) -> String {
@@ -613,23 +744,72 @@ pub fn provider_network(provider: &Provider) -> Result<JoycodeNetwork, ProxyErro
     )
 }
 
+fn validate_joycode_base_url(
+    candidate: &str,
+    network: JoycodeNetwork,
+) -> Result<String, ProxyError> {
+    let parsed = url::Url::parse(candidate.trim())
+        .map_err(|error| ProxyError::ConfigError(format!("Invalid JoyCode base URL: {error}")))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ProxyError::ConfigError(
+            "JoyCode base URL must not contain user info".to_string(),
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ProxyError::ConfigError(
+            "JoyCode base URL must not contain a query or fragment".to_string(),
+        ));
+    }
+    if !matches!(parsed.path(), "" | "/") {
+        return Err(ProxyError::ConfigError(
+            "JoyCode base URL must not contain an API path".to_string(),
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .map(|host| host.to_ascii_lowercase())
+        .ok_or_else(|| ProxyError::ConfigError("JoyCode base URL has no host".to_string()))?;
+    let valid = match network {
+        JoycodeNetwork::External => {
+            parsed.scheme() == "https"
+                && parsed.port_or_known_default() == Some(443)
+                && matches!(host.as_str(), "api-ai.jd.com" | "joycode-api.jd.com")
+        }
+        JoycodeNetwork::Internal => {
+            matches!(parsed.scheme(), "http" | "https")
+                && host == "joycode-api-saas.jd.com"
+                && matches!(parsed.port_or_known_default(), Some(80 | 443))
+        }
+    };
+    if !valid {
+        return Err(ProxyError::ConfigError(format!(
+            "JoyCode {:?} base URL is not an approved JD endpoint",
+            network
+        )));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
 pub fn provider_base_url(provider: &Provider) -> Result<String, ProxyError> {
     match provider_network(provider)? {
         JoycodeNetwork::Internal => Ok(JOYCODE_INTERNAL_BASE_URL.to_string()),
-        JoycodeNetwork::External => Ok(provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.joycode_external_base_url.as_deref())
-            .map(str::trim)
-            .filter(|url| url.starts_with("https://"))
-            .map(|url| url.trim_end_matches('/').to_string())
-            .or_else(|| {
-                std::env::var(JOYCODE_EXTERNAL_BASE_URL_ENV)
-                    .ok()
-                    .map(|url| url.trim().trim_end_matches('/').to_string())
-                    .filter(|url| url.starts_with("https://"))
-            })
-            .unwrap_or_else(|| JOYCODE_EXTERNAL_BASE_URL.to_string())),
+        JoycodeNetwork::External => {
+            let configured = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.joycode_external_base_url.as_deref())
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    std::env::var(JOYCODE_EXTERNAL_BASE_URL_ENV)
+                        .ok()
+                        .map(|url| url.trim().to_string())
+                        .filter(|url| !url.is_empty())
+                })
+                .unwrap_or_else(|| JOYCODE_EXTERNAL_BASE_URL.to_string());
+            validate_joycode_base_url(&configured, JoycodeNetwork::External)
+        }
     }
 }
 
@@ -720,6 +900,33 @@ fn user_info_endpoint(provider: &Provider) -> Result<String, ProxyError> {
     })
 }
 
+fn model_runtime_endpoint(provider: &Provider, operation: &str) -> Result<String, ProxyError> {
+    let base = provider_base_url(provider)?;
+    let (path, function_id) = match operation {
+        "prepare" => (
+            "/api/saas/model-runtime/v1/models/prepare",
+            "model_runtime_prepare",
+        ),
+        "runtime" => (
+            "/api/saas/model-runtime/v1/models/runtime",
+            "model_runtime_snapshot",
+        ),
+        "cancel" => (
+            "/api/saas/model-runtime/v1/models/cancel",
+            "model_runtime_cancel",
+        ),
+        _ => {
+            return Err(ProxyError::Internal(format!(
+                "Unsupported JoyCode runtime operation: {operation}"
+            )))
+        }
+    };
+    Ok(match provider_network(provider)? {
+        JoycodeNetwork::Internal => format!("{}{path}", base.trim_end_matches('/')),
+        JoycodeNetwork::External => sign_gateway_url(&base, function_id),
+    })
+}
+
 pub fn auth_headers_with_context(
     pt_key: &str,
     login_type: Option<&str>,
@@ -784,6 +991,362 @@ pub fn auth_headers_for_provider(
         meta.and_then(|meta| meta.joycode_login_type.as_deref()),
         meta.and_then(|meta| meta.joycode_tenant.as_deref()),
     )
+}
+
+fn runtime_token_key(
+    provider: &Provider,
+    pt_key: &str,
+    model: &str,
+    chat_id: &str,
+) -> Result<RuntimeTokenKey, ProxyError> {
+    Ok(RuntimeTokenKey {
+        provider_id: provider.id.clone(),
+        network: provider_network(provider)?,
+        account_scope: credential_fingerprint(pt_key),
+        model: model.to_string(),
+        chat_id: chat_id.to_string(),
+    })
+}
+
+fn runtime_error_code(payload: &Value) -> Option<String> {
+    let code_text = |value: &Value| {
+        value
+            .as_str()
+            .map(ToString::to_string)
+            .or_else(|| value.as_i64().map(|code| code.to_string()))
+    };
+    let is_success = |code: &str| {
+        matches!(code.trim().to_ascii_uppercase().as_str(), "SUCCESS" | "OK")
+            || code
+                .trim()
+                .parse::<i64>()
+                .is_ok_and(|code| matches!(code, 0 | 200))
+    };
+
+    // The current service returns `{ code: 0, bizCode: "SUCCESS" }` on a
+    // successful prepare. Match the official client: top-level `code` is the
+    // envelope authority, and bizCode only refines a failing envelope.
+    if let Some(code) = payload.get("code").and_then(&code_text) {
+        if is_success(&code) {
+            return None;
+        }
+        return payload
+            .get("bizCode")
+            .and_then(&code_text)
+            .filter(|biz_code| !is_success(biz_code))
+            .or(Some(code));
+    }
+
+    for pointer in [
+        "/biz_code",
+        "/error/code",
+        "/error/bizCode",
+        "/data/bizCode",
+        "/data/error/code",
+        "/bizCode",
+    ] {
+        let Some(value) = payload.pointer(pointer) else {
+            continue;
+        };
+        let code = code_text(value);
+        if code.as_deref().is_some_and(|code| !is_success(code)) {
+            return code;
+        }
+    }
+    None
+}
+
+fn parse_runtime_snapshot(
+    payload: &Value,
+    status: u16,
+) -> Result<RuntimeSnapshot, RuntimeCallError> {
+    if status >= 400 || runtime_error_code(payload).is_some() {
+        return Err(RuntimeCallError {
+            code: runtime_error_code(payload),
+            status,
+        });
+    }
+    let data = payload.get("data").unwrap_or(payload);
+    let token = data
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string);
+    let token_status = data
+        .get("tokenStatus")
+        .or_else(|| data.get("token_status"))
+        .and_then(Value::as_str)
+        .map(|status| status.trim().to_ascii_uppercase());
+    if token.is_none() && token_status.is_none() {
+        return Err(RuntimeCallError { code: None, status });
+    }
+    Ok(RuntimeSnapshot {
+        token,
+        token_status,
+        expire_at: data
+            .get("expireAt")
+            .or_else(|| data.get("expire_at"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        next_poll_at: data
+            .get("nextPollAt")
+            .or_else(|| data.get("next_poll_at"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        remaining_request_count: data
+            .get("remainingRequestCount")
+            .or_else(|| data.get("remaining_request_count"))
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+            }),
+    })
+}
+
+async fn call_runtime_prepare(
+    provider: &Provider,
+    pt_key: &str,
+    payload: &Value,
+) -> Result<RuntimeSnapshot, RuntimeCallError> {
+    let endpoint = model_runtime_endpoint(provider, "prepare").map_err(|_| RuntimeCallError {
+        code: Some("INVALID_RUNTIME_ENDPOINT".to_string()),
+        status: 500,
+    })?;
+    let headers = auth_headers_for_provider(provider, pt_key).map_err(|_| RuntimeCallError {
+        code: Some("401".to_string()),
+        status: 401,
+    })?;
+    let response = crate::proxy::http_client::get()
+        .post(endpoint)
+        .headers(headers)
+        .timeout(Duration::from_secs(30))
+        .json(payload)
+        .send()
+        .await
+        .map_err(|_| RuntimeCallError {
+            code: Some("MODEL_RUNTIME_NETWORK_ERROR".to_string()),
+            status: 503,
+        })?;
+    let status = response.status().as_u16();
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|_| RuntimeCallError { code: None, status })?;
+    parse_runtime_snapshot(&payload, status)
+}
+
+fn runtime_token_is_expired(expire_at: Option<&str>) -> bool {
+    let Some(expire_at) = expire_at.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    if let Ok(timestamp) = expire_at.parse::<i64>() {
+        let timestamp_ms = if timestamp < 10_000_000_000 {
+            timestamp.saturating_mul(1000)
+        } else {
+            timestamp
+        };
+        return chrono::Utc::now().timestamp_millis() >= timestamp_ms;
+    }
+    chrono::DateTime::parse_from_rfc3339(expire_at)
+        .map(|timestamp| chrono::Utc::now() >= timestamp.with_timezone(&chrono::Utc))
+        .unwrap_or(false)
+}
+
+fn runtime_poll_delay(next_poll_at: Option<&str>) -> Duration {
+    let delay = next_poll_at
+        .and_then(|next_poll_at| chrono::DateTime::parse_from_rfc3339(next_poll_at).ok())
+        .and_then(|next_poll_at| {
+            (next_poll_at.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                .to_std()
+                .ok()
+        })
+        .unwrap_or(RUNTIME_POLL_MIN_DELAY);
+    delay.clamp(RUNTIME_POLL_MIN_DELAY, RUNTIME_POLL_MAX_DELAY)
+}
+
+fn consume_cached_runtime_token(active: &mut Option<CachedRuntimeToken>) -> Option<String> {
+    let cached = active.as_mut()?;
+    if runtime_token_is_expired(cached.expire_at.as_deref())
+        || cached.remaining_request_count == Some(0)
+    {
+        *active = None;
+        return None;
+    }
+    if let Some(remaining) = cached.remaining_request_count.as_mut() {
+        *remaining = remaining.saturating_sub(1);
+    }
+    Some(cached.token.clone())
+}
+
+/// Acquire a READY model-runtime token before calling any JoyCode inference
+/// protocol. Calls for the same account/model/chat are single-flighted while
+/// different conversations remain concurrent.
+pub async fn acquire_runtime_token(
+    provider: &Provider,
+    pt_key: &str,
+    model: &str,
+    chat_id: &str,
+) -> Result<Option<JoycodeRuntimeLease>, ProxyError> {
+    let key = runtime_token_key(provider, pt_key, model, chat_id)?;
+    let slot = {
+        let mut slots = runtime_token_slots().lock().await;
+        slots
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(RuntimeTokenSlot::default())))
+            .clone()
+    };
+    let mut slot = slot.lock().await;
+    if let Some(token) = consume_cached_runtime_token(&mut slot.active) {
+        return Ok(Some(JoycodeRuntimeLease { key, token }));
+    }
+
+    let started_at = Instant::now();
+    let mut polling_token: Option<String> = None;
+    let mut recovery_count = 0usize;
+    loop {
+        if started_at.elapsed() >= RUNTIME_TOKEN_WAIT_TIMEOUT {
+            return Err(ProxyError::Timeout(format!(
+                "JoyCode model '{model}' queue did not become ready within {} seconds",
+                RUNTIME_TOKEN_WAIT_TIMEOUT.as_secs()
+            )));
+        }
+        let payload = if let Some(token) = polling_token.as_deref() {
+            json!({"token": token})
+        } else {
+            json!({
+                "model": model,
+                "chatId": chat_id,
+                "stream": true,
+                "client": JOYCODE_CLIENT,
+                "clientVersion": JOYCODE_CLIENT_VERSION,
+                "language": "UNKNOWN",
+                "orgFullName": ""
+            })
+        };
+        let snapshot = match call_runtime_prepare(provider, pt_key, &payload).await {
+            Ok(snapshot) => {
+                recovery_count = 0;
+                snapshot
+            }
+            Err(error) if error.is_bypass() => {
+                log::warn!("[JoyCode] model runtime explicitly requested queue bypass");
+                return Ok(None);
+            }
+            Err(error) if error.should_requeue() => {
+                recovery_count = recovery_count.saturating_add(1);
+                if recovery_count > RUNTIME_RECOVERY_LIMIT {
+                    return Err(error.into_proxy_error());
+                }
+                polling_token = None;
+                tokio::time::sleep(Duration::from_millis(
+                    500u64.saturating_mul(1u64 << (recovery_count - 1)),
+                ))
+                .await;
+                continue;
+            }
+            Err(error) if error.should_continue_queue() => {
+                recovery_count = recovery_count.saturating_add(1);
+                if recovery_count > RUNTIME_RECOVERY_LIMIT {
+                    return Err(error.into_proxy_error());
+                }
+                tokio::time::sleep(RUNTIME_POLL_MIN_DELAY).await;
+                continue;
+            }
+            Err(error) => return Err(error.into_proxy_error()),
+        };
+
+        let token = snapshot.token.as_deref().map(str::trim).unwrap_or_default();
+        if token.to_ascii_lowercase().starts_with(RUNTIME_BYPASS_TOKEN) {
+            log::warn!("[JoyCode] model runtime returned an explicit bypass token");
+            return Ok(None);
+        }
+        if snapshot.token_status.as_deref() == Some(RUNTIME_READY_STATUS) {
+            if token.is_empty() || snapshot.remaining_request_count == Some(0) {
+                recovery_count = recovery_count.saturating_add(1);
+                if recovery_count > RUNTIME_RECOVERY_LIMIT {
+                    return Err(ProxyError::UpstreamError {
+                        status: 503,
+                        body: Some(
+                            "JoyCode model runtime returned an unusable READY token".to_string(),
+                        ),
+                    });
+                }
+                polling_token = None;
+                continue;
+            }
+            let mut cached = CachedRuntimeToken {
+                token: token.to_string(),
+                expire_at: snapshot.expire_at,
+                remaining_request_count: snapshot.remaining_request_count,
+            };
+            if let Some(remaining) = cached.remaining_request_count.as_mut() {
+                *remaining = remaining.saturating_sub(1);
+            }
+            slot.active = Some(cached);
+            return Ok(Some(JoycodeRuntimeLease {
+                key,
+                token: token.to_string(),
+            }));
+        }
+        if !token.is_empty() {
+            polling_token = Some(token.to_string());
+        }
+        tokio::time::sleep(runtime_poll_delay(snapshot.next_poll_at.as_deref())).await;
+    }
+}
+
+pub async fn invalidate_runtime_token(lease: &JoycodeRuntimeLease) {
+    let slot = {
+        let slots = runtime_token_slots().lock().await;
+        slots.get(&lease.key).cloned()
+    };
+    if let Some(slot) = slot {
+        let mut slot = slot.lock().await;
+        if slot
+            .active
+            .as_ref()
+            .is_some_and(|active| active.token == lease.token)
+        {
+            slot.active = None;
+        }
+    }
+}
+
+fn runtime_token_error_code_text(body: Option<&str>) -> Option<&'static str> {
+    let body = body?;
+    let upper = body.to_ascii_uppercase();
+    [
+        "MODEL_TOKEN_INVALID",
+        "MODEL_TOKEN_MISSING",
+        "MODEL_TOKEN_EXPIRED",
+        "MODEL_TOKEN_CHAT_MISSING",
+        "MODEL_TOKEN_NOT_READY",
+        "400001",
+        "400002",
+        "400003",
+        "400004",
+        "409002",
+        "409003",
+    ]
+    .iter()
+    .find(|code| upper.contains(**code))
+    .copied()
+    .or_else(|| {
+        [
+            "MODEL TOKEN IS INVALID",
+            "TOKEN ALREADY EXPIRED",
+            "TOKEN NOT FOUND OR INVALID",
+        ]
+        .iter()
+        .find(|message| upper.contains(**message))
+        .map(|_| "MODEL_TOKEN_INVALID")
+    })
+}
+
+pub fn is_runtime_token_error_text(body: Option<&str>) -> bool {
+    runtime_token_error_code_text(body).is_some()
 }
 
 fn response_text(value: &Value, keys: &[&str]) -> Option<String> {
@@ -890,21 +1453,16 @@ pub async fn validate_discovered_credential(
     if let Some(base) = credential
         .color_base_url
         .as_deref()
-        .map(str::trim)
-        .filter(|base| base.starts_with("https://"))
+        .and_then(|base| validate_joycode_base_url(base, JoycodeNetwork::External).ok())
     {
-        endpoints.push(sign_gateway_url(base, "joycode_userInfo"));
+        endpoints.push(sign_gateway_url(&base, "joycode_userInfo"));
     }
-    if let Some(base) = credential
-        .master_base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|base| base.starts_with("http://") || base.starts_with("https://"))
-    {
-        endpoints.push(format!(
-            "{}/api/saas/user/v2/userInfo",
-            base.trim_end_matches('/')
-        ));
+    if let Some(raw_base) = credential.master_base_url.as_deref() {
+        if let Ok(base) = validate_joycode_base_url(raw_base, JoycodeNetwork::Internal) {
+            endpoints.push(format!("{base}/api/saas/user/v2/userInfo"));
+        } else if let Ok(base) = validate_joycode_base_url(raw_base, JoycodeNetwork::External) {
+            endpoints.push(sign_gateway_url(&base, "joycode_userInfo"));
+        }
     }
     if endpoints.is_empty() {
         endpoints.push(format!(
@@ -1317,7 +1875,18 @@ pub async fn validate_auth_envelope(response: ProxyResponse) -> Result<ProxyResp
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
-    if let Ok(payload) = serde_json::from_slice::<Value>(&bytes) {
+    let decoded =
+        crate::proxy::content_encoding::get_content_encoding(&headers).and_then(|encoding| {
+            crate::proxy::content_encoding::decompress_body_with_limit(
+                &encoding,
+                &bytes,
+                MAX_RESPONSE_BODY_BYTES,
+            )
+            .ok()
+            .flatten()
+        });
+    let inspect_bytes = decoded.as_deref().unwrap_or(&bytes);
+    if let Ok(payload) = serde_json::from_slice::<Value>(inspect_bytes) {
         let unauthorized = payload.get("code").and_then(Value::as_i64) == Some(401)
             || payload
                 .pointer("/data/loginUrl")
@@ -1328,6 +1897,13 @@ pub async fn validate_auth_envelope(response: ProxyResponse) -> Result<ProxyResp
                 "JoyCode credential expired; open the official login page and import it again"
                     .to_string(),
             ));
+        }
+        let body = String::from_utf8_lossy(inspect_bytes);
+        if let Some(code) = runtime_token_error_code_text(Some(&body)) {
+            return Err(ProxyError::UpstreamError {
+                status: 409,
+                body: Some(format!("JoyCode model runtime error: {code}")),
+            });
         }
     }
     Ok(ProxyResponse::buffered(status, headers, bytes))
@@ -1537,14 +2113,44 @@ fn cached_model(scope: &str, model_id: &str) -> Option<JoycodeModel> {
     })
 }
 
+fn cached_default_model(
+    scope: &str,
+    preferred_wire_api: Option<JoycodeWireApi>,
+) -> Option<JoycodeModel> {
+    let catalogs = catalogs().read().ok()?;
+    let catalog = catalogs.get(scope)?;
+    if catalog.loaded_at.elapsed() > MODEL_CACHE_TTL {
+        return None;
+    }
+    catalog
+        .models
+        .values()
+        .filter(|model| preferred_wire_api.is_none_or(|wire| model.wire_api == wire))
+        .min_by(|left, right| left.id.cmp(&right.id))
+        .cloned()
+        .or_else(|| {
+            catalog
+                .models
+                .values()
+                .min_by(|left, right| left.id.cmp(&right.id))
+                .cloned()
+        })
+}
+
 pub async fn resolve_model(
     provider: &Provider,
     model_id: &str,
     pt_key: &str,
+    preferred_wire_api: Option<JoycodeWireApi>,
 ) -> Result<JoycodeModel, ProxyError> {
     let use_catalog_default = matches!(model_id.trim(), "" | "joycode" | "custom");
-    if !use_catalog_default {
-        if let Some(model) = cached_model(&catalog_scope(provider, pt_key), model_id) {
+    let scope = catalog_scope(provider, pt_key);
+    if use_catalog_default {
+        if let Some(model) = cached_default_model(&scope, preferred_wire_api) {
+            return Ok(model);
+        }
+    } else {
+        if let Some(model) = cached_model(&scope, model_id) {
             return Ok(model);
         }
     }
@@ -1552,7 +2158,15 @@ pub async fn resolve_model(
         .await
         .map_err(ProxyError::ConfigError)?;
     if use_catalog_default {
-        return models.into_iter().next().ok_or_else(|| {
+        let selected = preferred_wire_api
+            .and_then(|preferred| {
+                models
+                    .iter()
+                    .find(|model| model.wire_api == preferred)
+                    .cloned()
+            })
+            .or_else(|| models.into_iter().next());
+        return selected.ok_or_else(|| {
             ProxyError::InvalidRequest("JoyCode account has no available model".to_string())
         });
     }
@@ -1793,6 +2407,270 @@ mod tests {
             url,
             "https://gateway.example/api?appid=joycode_ide&functionId=joycode_modelList&t=42&sign=7190b40634d7fb32a193bc46c5b9504034b1c8d39c5b7d2856a8048469cb8374"
         );
+    }
+
+    #[test]
+    fn joycode_base_url_requires_an_approved_jd_host() {
+        assert_eq!(
+            validate_joycode_base_url("https://api-ai.jd.com/", JoycodeNetwork::External).unwrap(),
+            "https://api-ai.jd.com"
+        );
+        assert!(validate_joycode_base_url(
+            "https://api-ai.jd.com.attacker.example",
+            JoycodeNetwork::External
+        )
+        .is_err());
+        assert!(validate_joycode_base_url(
+            "https://api-ai.jd.com/redirect",
+            JoycodeNetwork::External
+        )
+        .is_err());
+        assert!(validate_joycode_base_url(
+            "http://joycode-api-saas.jd.com",
+            JoycodeNetwork::Internal
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn parses_ready_model_runtime_snapshot_and_quota() {
+        let snapshot = parse_runtime_snapshot(
+            &json!({
+                "code": "00000",
+                "bizCode": "SUCCESS",
+                "data": {
+                    "token": "runtime-token",
+                    "tokenStatus": "READY",
+                    "expireAt": "2099-01-01T00:00:00Z",
+                    "remainingRequestCount": "3"
+                }
+            }),
+            200,
+        )
+        .unwrap();
+        assert_eq!(snapshot.token.as_deref(), Some("runtime-token"));
+        assert_eq!(snapshot.token_status.as_deref(), Some("READY"));
+        assert_eq!(snapshot.remaining_request_count, Some(3));
+    }
+
+    #[test]
+    fn runtime_bypass_token_accepts_current_prefixed_shape() {
+        assert!("mt_ready_bypass_123"
+            .to_ascii_lowercase()
+            .starts_with(RUNTIME_BYPASS_TOKEN));
+    }
+
+    #[test]
+    fn runtime_token_errors_are_detected_in_json_and_sse() {
+        assert!(is_runtime_token_error_text(Some(
+            r#"{"bizCode":"MODEL_TOKEN_EXPIRED"}"#
+        )));
+        assert!(is_runtime_token_error_text(Some(
+            "data: {\"code\":\"400002\"}\n\n"
+        )));
+        assert!(is_runtime_token_error_text(Some(
+            "token not found or invalid"
+        )));
+        assert!(!is_runtime_token_error_text(Some(
+            "data: {\"type\":\"message_start\"}\n\n"
+        )));
+    }
+
+    #[tokio::test]
+    async fn compressed_success_envelope_still_detects_runtime_token_error() {
+        use std::io::Write;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(br#"{"code":0,"bizCode":"SUCCESS","error":{"code":"MODEL_TOKEN_EXPIRED"}}"#)
+            .unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static("gzip"),
+        );
+        let response = ProxyResponse::buffered(http::StatusCode::OK, headers, compressed.into());
+        let error = match validate_auth_envelope(response).await {
+            Err(error) => error,
+            Ok(_) => panic!("compressed runtime-token error was not detected"),
+        };
+        assert!(matches!(
+            error,
+            ProxyError::UpstreamError {
+                status: 409,
+                body: Some(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn cached_runtime_token_consumes_quota_and_expires_at_zero() {
+        let mut active = Some(CachedRuntimeToken {
+            token: "runtime-token".to_string(),
+            expire_at: Some("2099-01-01T00:00:00Z".to_string()),
+            remaining_request_count: Some(1),
+        });
+        assert_eq!(
+            consume_cached_runtime_token(&mut active).as_deref(),
+            Some("runtime-token")
+        );
+        assert_eq!(
+            active
+                .as_ref()
+                .and_then(|token| token.remaining_request_count),
+            Some(0)
+        );
+        assert!(consume_cached_runtime_token(&mut active).is_none());
+        assert!(active.is_none());
+    }
+
+    /// Opt-in contract smoke test against the currently installed JoyCode
+    /// login state. It never prints credentials or model output and is ignored
+    /// by normal test runs because it consumes live account quota.
+    #[tokio::test]
+    #[ignore = "requires an active local JoyCode login and consumes live quota"]
+    async fn live_external_anthropic_and_responses_contract() {
+        let credential = discover_joycode_credentials()
+            .into_iter()
+            .next()
+            .expect("active JoyCode login");
+        let provider = Provider {
+            id: "joycode-live-contract".to_string(),
+            name: "JoyCode live contract".to_string(),
+            settings_config: json!({}),
+            website_url: Some(JOYCODE_WEBSITE_URL.to_string()),
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: Some(crate::provider::ProviderMeta {
+                provider_type: Some("joycode".to_string()),
+                joycode_network: Some("external".to_string()),
+                joycode_external_base_url: Some(JOYCODE_EXTERNAL_BASE_URL.to_string()),
+                joycode_login_type: credential.login_type.clone(),
+                joycode_tenant: credential.tenant.clone(),
+                ..Default::default()
+            }),
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        let models = fetch_models(&provider, &credential.pt_key)
+            .await
+            .expect("fetch live model catalog");
+
+        for wire_api in [JoycodeWireApi::Anthropic, JoycodeWireApi::Responses] {
+            let model = models
+                .iter()
+                .find(|model| model.wire_api == wire_api)
+                .expect("live catalog model for protocol");
+            let chat_id = format!("cc-switch-live-contract-{}", uuid::Uuid::new_v4());
+            let lease = acquire_runtime_token(&provider, &credential.pt_key, &model.id, &chat_id)
+                .await
+                .expect("prepare model runtime");
+            let mut headers = auth_headers_for_provider(&provider, &credential.pt_key)
+                .expect("live auth headers");
+            headers.insert(
+                http::header::ACCEPT_ENCODING,
+                http::HeaderValue::from_static("identity"),
+            );
+            if let Some(lease) = lease.as_ref() {
+                headers.insert(
+                    http::HeaderName::from_static("x-model-token"),
+                    http::HeaderValue::from_str(lease.token()).expect("runtime token header"),
+                );
+            }
+            let mut body = match wire_api {
+                JoycodeWireApi::Anthropic => json!({
+                    "model": model.id,
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "Reply with OK only."}],
+                    "stream": true
+                }),
+                JoycodeWireApi::Responses => json!({
+                    "model": model.id,
+                    "input": "Reply with OK only.",
+                    "max_output_tokens": 64,
+                    "stream": true,
+                    "store": true
+                }),
+                JoycodeWireApi::Chat => unreachable!(),
+            };
+            decorate_body(&mut body, wire_api);
+            let endpoint = endpoint_for(&provider, wire_api).expect("live inference endpoint");
+            let response = crate::proxy::http_client::get()
+                .post(endpoint)
+                .headers(headers)
+                .timeout(Duration::from_secs(90))
+                .json(&body)
+                .send()
+                .await
+                .expect("live inference request");
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let content_encoding = response
+                .headers()
+                .get(http::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let response_bytes = response
+                .bytes()
+                .await
+                .expect("live inference response body");
+            let decoded =
+                crate::proxy::content_encoding::decompress_body(&content_encoding, &response_bytes)
+                    .expect("decompress live inference response")
+                    .unwrap_or_else(|| response_bytes.to_vec());
+            let response_text = String::from_utf8_lossy(&decoded);
+
+            if let Some(lease) = lease.as_ref() {
+                let cancel_endpoint =
+                    model_runtime_endpoint(&provider, "cancel").expect("runtime cancel endpoint");
+                let _ = crate::proxy::http_client::get()
+                    .post(cancel_endpoint)
+                    .headers(
+                        auth_headers_for_provider(&provider, &credential.pt_key)
+                            .expect("cancel auth headers"),
+                    )
+                    .json(&json!({"token": lease.token()}))
+                    .send()
+                    .await;
+            }
+            assert!(status.is_success(), "live inference HTTP {status}");
+            assert!(
+                !response_text.trim().is_empty(),
+                "empty live inference body"
+            );
+            assert!(
+                !is_runtime_token_error_text(Some(&response_text)),
+                "live inference rejected the runtime token"
+            );
+            if let Ok(payload) = serde_json::from_str::<Value>(&response_text) {
+                assert!(
+                    payload.get("error").is_none_or(Value::is_null)
+                        && runtime_error_code(&payload).is_none(),
+                    "live inference returned a structured error"
+                );
+            } else {
+                assert!(
+                    response_text.trim_start().starts_with("data:")
+                        || response_text.trim_start().starts_with("event:"),
+                    "live inference returned neither JSON nor SSE (content-type: {content_type}, content-encoding: {content_encoding}, first-byte: {:?})",
+                    decoded.first()
+                );
+            }
+        }
     }
 
     #[test]

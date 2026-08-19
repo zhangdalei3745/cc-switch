@@ -1,5 +1,7 @@
 # JD JoyCode 全应用供应商需求与技术实现方案
 
+> **2026-08-20 修复验收提示：** 本文是首版设计基线；JoyCode `3.0.10` 的 model-runtime 排队令牌、Claude 动态协议响应和 Codex Responses 默认路由已经补齐，并完成 Anthropic/Responses 最小真实流式调用。请以 [JoyCode 供应商逆向分析、修复与验收记录](./joycode-provider-review-2026-08-20-zh.md) 的当前状态为准。
+
 > 状态：已完成可验证协议实现；外网域名与官方 OAuth 回调仍等待协议确认
 > 目标应用：CC Switch 全部供应商应用（Claude、Claude Desktop、Codex、Gemini、Grok Build、OpenCode、OpenClaw、Hermes、Pi）
 > 编写日期：2026-08-17

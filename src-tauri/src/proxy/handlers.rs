@@ -292,7 +292,14 @@ async fn handle_messages_for_app(
             app_type.as_str()
         ))
     })?;
-    let needs_transform = adapter.needs_transform(&ctx.provider);
+    // JoyCode resolves the upstream wire protocol per model. When the
+    // forwarder provides that runtime truth, do not fall back to the provider
+    // form's static apiFormat: a native Anthropic response must be passed
+    // through, while Chat/Responses responses still need conversion.
+    let needs_transform = claude_response_needs_transform(
+        Some(api_format.as_str()),
+        adapter.needs_transform(&ctx.provider),
+    );
 
     // Claude 特有：格式转换处理
     if needs_transform {
@@ -317,6 +324,15 @@ async fn handle_messages_for_app(
         connection_guard,
     )
     .await
+}
+
+fn claude_response_needs_transform(
+    resolved_wire_format: Option<&str>,
+    provider_default: bool,
+) -> bool {
+    resolved_wire_format
+        .map(super::providers::claude_api_format_needs_transform)
+        .unwrap_or(provider_default)
 }
 
 fn validate_claude_desktop_gateway_auth(
@@ -3127,9 +3143,9 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
-        codex_proxy_error_json, responses_sse_stream_to_anthropic_message,
-        responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        claude_response_needs_transform, codex_proxy_error_json,
+        responses_sse_stream_to_anthropic_message, responses_sse_to_response_value,
+        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
     use bytes::Bytes;
@@ -3751,6 +3767,17 @@ data: [DONE]\n\n";
             "openai_responses",
             false,
         ));
+    }
+
+    #[test]
+    fn joycode_runtime_wire_format_overrides_static_provider_format() {
+        assert!(!claude_response_needs_transform(Some("anthropic"), true));
+        assert!(claude_response_needs_transform(
+            Some("openai_responses"),
+            false
+        ));
+        assert!(claude_response_needs_transform(Some("openai_chat"), false));
+        assert!(claude_response_needs_transform(None, true));
     }
 
     #[test]

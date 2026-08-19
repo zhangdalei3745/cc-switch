@@ -240,7 +240,7 @@ export function JoycodeConnectionFields({
           value={credential}
           onChange={(event) => {
             setModels([]);
-            onCredential(event.target.value, {
+            onCredential(event.target.value.trim(), {
               ...credentialMetadata,
               loginType: undefined,
               tenant: undefined,

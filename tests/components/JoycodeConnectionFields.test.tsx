@@ -5,8 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JoycodeConnectionFields } from "@/components/providers/forms/JoycodeConnectionFields";
 
 const modelFetchMocks = vi.hoisted(() => ({
-  discoverJoycodePtKey: vi.fn(),
   fetchJoycodeModels: vi.fn(),
+  importJoycodeCredential: vi.fn(),
+  validateJoycodeCredential: vi.fn(),
 }));
 const toastMocks = vi.hoisted(() => ({
   error: vi.fn(),
@@ -15,8 +16,9 @@ const toastMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/api/model-fetch", () => ({
-  discoverJoycodePtKey: modelFetchMocks.discoverJoycodePtKey,
   fetchJoycodeModels: modelFetchMocks.fetchJoycodeModels,
+  importJoycodeCredential: modelFetchMocks.importJoycodeCredential,
+  validateJoycodeCredential: modelFetchMocks.validateJoycodeCredential,
 }));
 
 vi.mock("sonner", () => ({ toast: toastMocks }));
@@ -67,7 +69,11 @@ describe("JoycodeConnectionFields", () => {
   it("keeps explicit local-client import as an optional path", async () => {
     const user = userEvent.setup();
     const onCredential = vi.fn();
-    modelFetchMocks.discoverJoycodePtKey.mockResolvedValue("BJ.local-key");
+    modelFetchMocks.importJoycodeCredential.mockResolvedValue({
+      ptKey: "BJ.local-key",
+      loginType: "N_PIN_PC",
+      tenant: "joycode",
+    });
     modelFetchMocks.fetchJoycodeModels.mockResolvedValue([
       {
         id: "joy-model",
@@ -78,7 +84,7 @@ describe("JoycodeConnectionFields", () => {
     render(<ControlledFields onCredential={onCredential} />);
 
     await user.click(
-      screen.getByRole("button", { name: "从本机 JoyCode 导入" }),
+      screen.getByRole("button", { name: "从 JoyCode 一键导入" }),
     );
 
     await waitFor(() =>
@@ -87,6 +93,9 @@ describe("JoycodeConnectionFields", () => {
     expect(modelFetchMocks.fetchJoycodeModels).toHaveBeenCalledWith({
       network: "internal",
       ptKey: "BJ.local-key",
+      loginType: "N_PIN_PC",
+      tenant: "joycode",
+      externalBaseUrl: undefined,
     });
     expect(await screen.findByText("joy-model")).toBeInTheDocument();
   });

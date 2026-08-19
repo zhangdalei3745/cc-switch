@@ -1152,6 +1152,25 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        self.forward_inner(
+            app_type, method, provider, endpoint, body, headers, extensions, adapter, false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_inner(
+        &self,
+        app_type: &AppType,
+        method: &http::Method,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+        headers: &axum::http::HeaderMap,
+        extensions: &Extensions,
+        adapter: &dyn ProviderAdapter,
+        joycode_runtime_retried: bool,
+    ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         let is_joycode = super::providers::joycode::is_joycode_provider(provider);
         let joycode_pt_key = if is_joycode {
             let (_configured_base, key) = provider.resolve_usage_credentials(app_type);
@@ -1246,6 +1265,15 @@ impl RequestForwarder {
                 provider,
                 &model,
                 joycode_pt_key.as_deref().unwrap_or_default(),
+                match app_type {
+                    AppType::Claude | AppType::ClaudeDesktop => {
+                        Some(super::providers::joycode::JoycodeWireApi::Anthropic)
+                    }
+                    AppType::Codex | AppType::GrokBuild => {
+                        Some(super::providers::joycode::JoycodeWireApi::Responses)
+                    }
+                    _ => None,
+                },
             )
             .await?;
             mapped_body["model"] = Value::String(route.id.clone());
@@ -1820,6 +1848,25 @@ impl RequestForwarder {
             || codex_responses_to_anthropic
             || request_is_streaming;
 
+        // Current JoyCode inference endpoints require a READY model-runtime
+        // token for every wire protocol. Use a client-provided/stable
+        // conversation id when available; the request-scoped proxy session is
+        // a safe fallback for clients that provide no stable identity.
+        let joycode_runtime_lease = if let Some(route) = joycode_model.as_ref() {
+            let chat_id = joycode_stable_session_id
+                .as_deref()
+                .unwrap_or(self.session_id.as_str());
+            super::providers::joycode::acquire_runtime_token(
+                provider,
+                joycode_pt_key.as_deref().unwrap_or_default(),
+                &route.id,
+                chat_id,
+            )
+            .await?
+        } else {
+            None
+        };
+
         // Codex OAuth 需要注入的 ChatGPT-Account-Id（在动态 token 获取期间填充）
         let mut codex_oauth_account_id: Option<String> = None;
         let mut should_send_codex_oauth_session_headers = false;
@@ -1989,6 +2036,20 @@ impl RequestForwarder {
                 .iter()
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect();
+            if let Some(lease) = joycode_runtime_lease.as_ref() {
+                let token = lease.token();
+                if !log_secrets.iter().any(|secret| secret == token) {
+                    log_secrets.push(token.to_string());
+                }
+                auth_headers.push((
+                    http::HeaderName::from_static("x-model-token"),
+                    http::HeaderValue::from_str(token).map_err(|error| {
+                        ProxyError::AuthError(format!(
+                            "Invalid JoyCode model runtime token: {error}"
+                        ))
+                    })?,
+                ));
+            }
         }
 
         // 注入 Codex OAuth 的 ChatGPT-Account-Id header（如果有 account_id）
@@ -2503,8 +2564,47 @@ impl RequestForwarder {
             let mut response = self
                 .prepare_success_response_for_failover(response, request_is_streaming)
                 .await?;
+            if is_joycode && request_is_streaming && !response.is_json() {
+                match self.validate_joycode_runtime_stream_start(response).await {
+                    Ok(validated) => response = validated,
+                    Err(error)
+                        if !joycode_runtime_retried
+                            && proxy_error_is_joycode_runtime_token_error(&error) =>
+                    {
+                        if let Some(lease) = joycode_runtime_lease.as_ref() {
+                            super::providers::joycode::invalidate_runtime_token(lease).await;
+                        }
+                        log::info!(
+                            "[JoyCode] runtime token rejected at stream start; requeueing once"
+                        );
+                        return Box::pin(self.forward_inner(
+                            app_type, method, provider, endpoint, body, headers, extensions,
+                            adapter, true,
+                        ))
+                        .await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             if is_joycode && response.is_json() {
-                response = super::providers::joycode::validate_auth_envelope(response).await?;
+                match super::providers::joycode::validate_auth_envelope(response).await {
+                    Ok(validated) => response = validated,
+                    Err(error)
+                        if !joycode_runtime_retried
+                            && proxy_error_is_joycode_runtime_token_error(&error) =>
+                    {
+                        if let Some(lease) = joycode_runtime_lease.as_ref() {
+                            super::providers::joycode::invalidate_runtime_token(lease).await;
+                        }
+                        log::info!("[JoyCode] runtime token rejected; requeueing once");
+                        return Box::pin(self.forward_inner(
+                            app_type, method, provider, endpoint, body, headers, extensions,
+                            adapter, true,
+                        ))
+                        .await;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if joycode_wire_api == Some(super::providers::joycode::JoycodeWireApi::Responses) {
                 response = super::providers::joycode::normalize_responses_response(
@@ -2570,6 +2670,20 @@ impl RequestForwarder {
             };
             let body_text = String::from_utf8(decoded).ok();
 
+            if is_joycode
+                && !joycode_runtime_retried
+                && super::providers::joycode::is_runtime_token_error_text(body_text.as_deref())
+            {
+                if let Some(lease) = joycode_runtime_lease.as_ref() {
+                    super::providers::joycode::invalidate_runtime_token(lease).await;
+                }
+                log::info!("[JoyCode] runtime token rejected by upstream; requeueing once");
+                return Box::pin(self.forward_inner(
+                    app_type, method, provider, endpoint, body, headers, extensions, adapter, true,
+                ))
+                .await;
+            }
+
             // A stored Responses chain can expire independently of our local
             // six-hour cache. Retry once with the original full history after
             // clearing the chain; the recursive call cannot re-inject it.
@@ -2580,8 +2694,16 @@ impl RequestForwarder {
                 log::info!(
                     "[JoyCode] stored response chain rejected; retrying once with full history"
                 );
-                return Box::pin(self.forward(
-                    app_type, method, provider, endpoint, body, headers, extensions, adapter,
+                return Box::pin(self.forward_inner(
+                    app_type,
+                    method,
+                    provider,
+                    endpoint,
+                    body,
+                    headers,
+                    extensions,
+                    adapter,
+                    joycode_runtime_retried,
                 ))
                 .await;
             }
@@ -2596,8 +2718,16 @@ impl RequestForwarder {
                     );
                 }
                 log::info!("[JoyCode] prompt_cache_key is unsupported; retrying once without it");
-                return Box::pin(self.forward(
-                    app_type, method, provider, endpoint, body, headers, extensions, adapter,
+                return Box::pin(self.forward_inner(
+                    app_type,
+                    method,
+                    provider,
+                    endpoint,
+                    body,
+                    headers,
+                    extensions,
+                    adapter,
+                    joycode_runtime_retried,
                 ))
                 .await;
             }
@@ -2781,6 +2911,52 @@ impl RequestForwarder {
                 return Ok(ProxyResponse::streamed(status, headers, replay));
             }
         }
+    }
+
+    async fn validate_joycode_runtime_stream_start(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        const MAX_RUNTIME_ERROR_PRIME_BYTES: usize = 64 * 1024;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mut stream = Box::pin(response.bytes_stream());
+        let mut replay_chunks: Vec<Bytes> = Vec::new();
+        let mut buffered = Vec::new();
+
+        loop {
+            let Some(chunk) = stream.next().await else {
+                break;
+            };
+            let chunk = chunk.map_err(|error| {
+                ProxyError::ForwardFailed(format!(
+                    "Failed to inspect JoyCode stream start: {error}"
+                ))
+            })?;
+            if buffered.len() < MAX_RUNTIME_ERROR_PRIME_BYTES {
+                let remaining = MAX_RUNTIME_ERROR_PRIME_BYTES - buffered.len();
+                buffered.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            replay_chunks.push(chunk);
+
+            let text = String::from_utf8_lossy(&buffered);
+            if super::providers::joycode::is_runtime_token_error_text(Some(&text)) {
+                return Err(ProxyError::UpstreamError {
+                    status: 409,
+                    body: Some("JoyCode model runtime token was rejected".to_string()),
+                });
+            }
+            if text.contains("\n\n")
+                || text.contains("\r\n\r\n")
+                || buffered.len() >= MAX_RUNTIME_ERROR_PRIME_BYTES
+            {
+                break;
+            }
+        }
+
+        let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+        Ok(ProxyResponse::streamed(status, headers, replay))
     }
 
     async fn prime_streaming_response(
@@ -3588,12 +3764,31 @@ fn headers_contain_proxy_placeholder(headers: &http::HeaderMap) -> bool {
     })
 }
 
+fn proxy_error_is_joycode_runtime_token_error(error: &ProxyError) -> bool {
+    match error {
+        ProxyError::UpstreamError { body, .. } => {
+            super::providers::joycode::is_runtime_token_error_text(body.as_deref())
+                || body
+                    .as_deref()
+                    .is_some_and(|body| body == "JoyCode model runtime token was rejected")
+        }
+        _ => false,
+    }
+}
+
 fn should_preserve_exact_header_case(
     adapter_name: &str,
     provider: &Provider,
     resolved_claude_api_format: Option<&str>,
     is_copilot: bool,
 ) -> bool {
+    // The raw hyper path does not follow redirects. JoyCode carries ptKey and
+    // X-Model-Token custom headers, which reqwest's standard redirect policy
+    // does not classify as sensitive headers for cross-host stripping.
+    if provider.is_joycode() {
+        return true;
+    }
+
     if matches!(adapter_name, "Codex" | "Gemini") {
         return false;
     }
