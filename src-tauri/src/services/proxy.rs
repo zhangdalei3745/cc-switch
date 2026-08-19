@@ -453,12 +453,12 @@ impl ProxyService {
             ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken
         };
         // Copilot/Codex 接管时 live config 可能还是旧供应商；显示模型必须跟随目标 provider。
-        let takeover_model_fields =
-            if provider.uses_managed_account_auth() || provider.is_joycode() {
-                Self::build_claude_takeover_model_fields(&provider.settings_config)
-            } else {
-                Self::build_claude_takeover_model_fields(config)
-            };
+        let takeover_model_fields = if provider.uses_managed_account_auth() || provider.is_joycode()
+        {
+            Self::build_claude_takeover_model_fields(&provider.settings_config)
+        } else {
+            Self::build_claude_takeover_model_fields(config)
+        };
 
         Self::apply_claude_takeover_fields_with_policy_and_models(
             config,
@@ -4200,11 +4200,7 @@ mod tests {
             "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
             Some("claude-sonnet-4.6"),
         );
-        assert_env_str(
-            env,
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            Some("claude-opus-4-8"),
-        );
+        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-4-8"));
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
@@ -4215,11 +4211,7 @@ mod tests {
             "CLAUDE_CODE_SUBAGENT_MODEL",
             Some("claude-sonnet-4.6[1M]"),
         );
-        assert_env_str(
-            env,
-            "ANTHROPIC_AUTH_TOKEN",
-            Some(PROXY_TOKEN_PLACEHOLDER),
-        );
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
         assert_env_str(env, "ANTHROPIC_API_KEY", None);
     }
 
