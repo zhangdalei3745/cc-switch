@@ -4310,7 +4310,10 @@ impl ProviderService {
         }
 
         fn claude_needs_migration(provider: &Provider) -> bool {
-            let env = provider.settings_config.get("env").and_then(Value::as_object);
+            let env = provider
+                .settings_config
+                .get("env")
+                .and_then(Value::as_object);
             [
                 "ANTHROPIC_MODEL",
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -4318,12 +4321,7 @@ impl ProviderService {
                 "ANTHROPIC_DEFAULT_OPUS_MODEL",
             ]
             .into_iter()
-            .any(|key| {
-                is_placeholder(
-                    env.and_then(|value| value.get(key))
-                        .and_then(Value::as_str),
-                )
-            })
+            .any(|key| is_placeholder(env.and_then(|value| value.get(key)).and_then(Value::as_str)))
         }
 
         fn codex_needs_migration(provider: &Provider) -> bool {
@@ -4417,8 +4415,7 @@ impl ProviderService {
                     entry
                 })
                 .collect();
-            provider.settings_config["modelCatalog"] =
-                serde_json::json!({ "models": entries });
+            provider.settings_config["modelCatalog"] = serde_json::json!({ "models": entries });
 
             if let Some(config) = provider
                 .settings_config
@@ -4427,9 +4424,7 @@ impl ProviderService {
                 .map(str::to_string)
             {
                 if let Ok(mut document) = config.parse::<toml_edit::DocumentMut>() {
-                    let current = document
-                        .get("model")
-                        .and_then(toml_edit::Item::as_str);
+                    let current = document.get("model").and_then(toml_edit::Item::as_str);
                     if is_placeholder(current) {
                         document["model"] = toml_edit::value(default_model.id);
                         provider.settings_config["config"] = Value::String(document.to_string());
@@ -4456,7 +4451,8 @@ impl ProviderService {
                 }
 
                 let (_, configured_key) = provider.resolve_usage_credentials(&app_type);
-                let pt_key = crate::proxy::providers::joycode::resolve_latest_pt_key(&configured_key);
+                let pt_key =
+                    crate::proxy::providers::joycode::resolve_latest_pt_key(&configured_key);
                 if pt_key.is_empty() {
                     log::warn!(
                         "JoyCode model mapping migration skipped for {}: missing credential",
@@ -4464,17 +4460,20 @@ impl ProviderService {
                     );
                     continue;
                 }
-                let models =
-                    match crate::proxy::providers::joycode::fetch_models(&provider, &pt_key).await {
-                        Ok(models) => models,
-                        Err(error) => {
-                            log::warn!(
-                                "JoyCode model mapping migration failed for {}: {error}",
-                                provider.id
-                            );
-                            continue;
-                        }
-                    };
+                let models = match crate::proxy::providers::joycode::fetch_models(
+                    &provider, &pt_key,
+                )
+                .await
+                {
+                    Ok(models) => models,
+                    Err(error) => {
+                        log::warn!(
+                            "JoyCode model mapping migration failed for {}: {error}",
+                            provider.id
+                        );
+                        continue;
+                    }
+                };
                 let changed = match app_type {
                     AppType::Claude => set_claude_mapping(&mut provider, &models),
                     AppType::Codex => set_codex_catalog(&mut provider, &models),
