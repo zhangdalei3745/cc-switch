@@ -453,11 +453,12 @@ impl ProxyService {
             ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken
         };
         // Copilot/Codex 接管时 live config 可能还是旧供应商；显示模型必须跟随目标 provider。
-        let takeover_model_fields = if provider.uses_managed_account_auth() {
-            Self::build_claude_takeover_model_fields(&provider.settings_config)
-        } else {
-            Self::build_claude_takeover_model_fields(config)
-        };
+        let takeover_model_fields =
+            if provider.uses_managed_account_auth() || provider.is_joycode() {
+                Self::build_claude_takeover_model_fields(&provider.settings_config)
+            } else {
+                Self::build_claude_takeover_model_fields(config)
+            };
 
         Self::apply_claude_takeover_fields_with_policy_and_models(
             config,
@@ -4199,7 +4200,11 @@ mod tests {
             "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
             Some("claude-sonnet-4.6"),
         );
-        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-4-8"));
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            Some("claude-opus-4-8"),
+        );
         assert_env_str(
             env,
             "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
@@ -4210,8 +4215,87 @@ mod tests {
             "CLAUDE_CODE_SUBAGENT_MODEL",
             Some("claude-sonnet-4.6[1M]"),
         );
-        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(
+            env,
+            "ANTHROPIC_AUTH_TOKEN",
+            Some(PROXY_TOKEN_PLACEHOLDER),
+        );
         assert_env_str(env, "ANTHROPIC_API_KEY", None);
+    }
+
+    #[test]
+    fn joycode_claude_takeover_sources_migrated_models_from_provider() {
+        let mut provider = Provider::with_id(
+            "joycode".to_string(),
+            "JD Joycode".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://joycode-api-saas.jd.com",
+                    "ANTHROPIC_MODEL": "Claude-Sonnet-4.6-hq",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Claude-Sonnet-4.6-hq",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Claude-Sonnet-4.6-hq",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Claude-Sonnet-4.6-hq",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Claude-Sonnet-4.6-hq",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Claude-Opus-4.8-hq",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Claude-Opus-4.8-hq"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("joycode".to_string()),
+            ..Default::default()
+        });
+
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
+                "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "joycode",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "joycode",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "joycode"
+            }
+        });
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+
+        let env = live_config
+            .get("env")
+            .and_then(Value::as_object)
+            .expect("env should exist");
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            Some("claude-haiku-4-5"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            Some("Claude-Sonnet-4.6-hq"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            Some("claude-sonnet-4-6"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            Some("Claude-Sonnet-4.6-hq"),
+        );
+        assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", Some("claude-opus-4-8"));
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            Some("Claude-Opus-4.8-hq"),
+        );
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
     }
 
     #[test]
