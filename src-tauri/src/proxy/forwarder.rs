@@ -2613,6 +2613,13 @@ impl RequestForwarder {
                     joycode_response_session_context.clone(),
                 )
                 .await?;
+            } else if joycode_wire_api == Some(super::providers::joycode::JoycodeWireApi::Anthropic)
+            {
+                response = super::providers::joycode::normalize_anthropic_response(
+                    response,
+                    request_is_streaming,
+                )
+                .await?;
             }
             // Streaming requests normally return SSE. If a compatible gateway
             // explicitly returns JSON instead, buffer and validate it inside the retry

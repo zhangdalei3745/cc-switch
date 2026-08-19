@@ -28,7 +28,7 @@ use super::{
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_responses::{
-            create_anthropic_sse_stream_from_responses,
+            anthropic_message_to_sse_events, create_anthropic_sse_stream_from_responses,
             create_anthropic_sse_stream_from_responses_with_web_search_options,
         },
         transform, transform_codex_anthropic, transform_codex_chat,
@@ -315,6 +315,16 @@ async fn handle_messages_for_app(
         .await;
     }
 
+    // JoyCode and a few Anthropic-compatible gateways can ignore `stream:true`
+    // and return a complete Anthropic Message as application/json. Passing that
+    // body through makes Claude Code observe a 200 response with zero SSE events,
+    // then fall back to an unreliable second request. Reframe the complete
+    // message into a standards-compliant Anthropic SSE lifecycle instead.
+    if should_reframe_anthropic_stream_response(is_stream, &api_format, response.is_sse()) {
+        return handle_anthropic_json_stream_fallback(response, &ctx, &state, connection_guard)
+            .await;
+    }
+
     // 通用响应处理（透传模式）
     process_response(
         response,
@@ -324,6 +334,86 @@ async fn handle_messages_for_app(
         connection_guard,
     )
     .await
+}
+
+fn should_reframe_anthropic_stream_response(
+    client_requested_stream: bool,
+    api_format: &str,
+    upstream_is_sse: bool,
+) -> bool {
+    client_requested_stream && api_format == "anthropic" && !upstream_is_sse
+}
+
+fn is_anthropic_message(value: &Value) -> bool {
+    value.is_object()
+        && value.get("content").is_some_and(Value::is_array)
+        && value.get("model").is_some_and(Value::is_string)
+        && value.get("usage").is_some_and(Value::is_object)
+}
+
+async fn handle_anthropic_json_stream_fallback(
+    response: super::hyper_client::ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    _connection_guard: Option<ActiveConnectionGuard>,
+) -> Result<axum::response::Response, ProxyError> {
+    let body_timeout =
+        if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
+            std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
+        } else {
+            std::time::Duration::ZERO
+        };
+    let (mut response_headers, status, body_bytes) =
+        read_decoded_body(response, ctx.tag, body_timeout).await?;
+    strip_entity_headers_for_rebuilt_body(&mut response_headers);
+    strip_hop_by_hop_response_headers(&mut response_headers);
+
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    let events = if body_looks_like_sse(&body_text) {
+        vec![body_bytes]
+    } else {
+        let message: Value = serde_json::from_slice(&body_bytes).map_err(|error| {
+            upstream_body_parse_error(
+                "Anthropic upstream ignored stream:true but did not return JSON or SSE",
+                &error,
+                &response_headers,
+                &body_text,
+            )
+        })?;
+        if !is_anthropic_message(&message) {
+            return Err(ProxyError::TransformError(format!(
+                "Anthropic upstream ignored stream:true but returned JSON that is not a Message (body-bytes: {})",
+                body_bytes.len()
+            )));
+        }
+        spawn_claude_usage_log(state, ctx, &message, status.as_u16(), true);
+        anthropic_message_to_sse_events(&message)
+    };
+
+    response_headers.remove(axum::http::header::CONTENT_TYPE);
+    response_headers.remove(axum::http::header::CACHE_CONTROL);
+    let mut builder = axum::response::Response::builder().status(status);
+    for (key, value) in response_headers.iter() {
+        builder = builder.header(key, value);
+    }
+    builder = builder
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        )
+        .header(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+
+    let stream = futures::stream::iter(events.into_iter().map(Ok::<Bytes, std::io::Error>));
+    builder
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|error| {
+            ProxyError::Internal(format!(
+                "Failed to build reframed Anthropic SSE response: {error}"
+            ))
+        })
 }
 
 fn claude_response_needs_transform(
@@ -3145,7 +3235,8 @@ mod tests {
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
         claude_response_needs_transform, codex_proxy_error_json,
         responses_sse_stream_to_anthropic_message, responses_sse_to_response_value,
-        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
+        should_reframe_anthropic_stream_response, should_use_claude_transform_streaming, transform,
+        upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
     use bytes::Bytes;
@@ -3171,6 +3262,30 @@ mod tests {
         assert!(!body_looks_like_sse("<html><body>blocked</body></html>"));
         assert!(!body_looks_like_sse("Bad Gateway"));
         assert!(!body_looks_like_sse(""));
+    }
+
+    #[test]
+    fn reframes_only_non_sse_anthropic_stream_responses() {
+        assert!(should_reframe_anthropic_stream_response(
+            true,
+            "anthropic",
+            false
+        ));
+        assert!(!should_reframe_anthropic_stream_response(
+            true,
+            "anthropic",
+            true
+        ));
+        assert!(!should_reframe_anthropic_stream_response(
+            false,
+            "anthropic",
+            false
+        ));
+        assert!(!should_reframe_anthropic_stream_response(
+            true,
+            "openai_responses",
+            false
+        ));
     }
 
     #[test]

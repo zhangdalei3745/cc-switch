@@ -1484,6 +1484,15 @@ pub async fn validate_discovered_credential(
 }
 
 pub fn decorate_body(body: &mut Value, wire_api: JoycodeWireApi) {
+    if wire_api == JoycodeWireApi::Anthropic {
+        // Claude Code 2.1.235 sends the newer context-management beta field.
+        // JoyCode's current Anthropic adapter rejects it with HTTP 200 plus a
+        // nested 400 error, so omit the optional server-side compaction hint.
+        // The full message history remains in `messages` and is not discarded.
+        if let Some(object) = body.as_object_mut() {
+            object.remove("context_management");
+        }
+    }
     body["client"] = Value::String(JOYCODE_CLIENT.to_string());
     body["clientVersion"] = Value::String(JOYCODE_CLIENT_VERSION.to_string());
     if wire_api == JoycodeWireApi::Responses {
@@ -1721,12 +1730,22 @@ pub struct JoycodeResponsesSseNormalizer {
     utf8_remainder: Vec<u8>,
     pending_event: Option<String>,
     session_context: Option<JoycodeResponseSessionContext>,
+    drop_done: bool,
 }
 
 impl JoycodeResponsesSseNormalizer {
     pub fn with_session_context(context: Option<JoycodeResponseSessionContext>) -> Self {
         Self {
             session_context: context,
+            ..Self::default()
+        }
+    }
+
+    fn for_anthropic() -> Self {
+        Self {
+            // Anthropic streams terminate with message_stop and do not use the
+            // OpenAI-style [DONE] sentinel emitted by JoyCode's outer wrapper.
+            drop_done: true,
             ..Self::default()
         }
     }
@@ -1776,16 +1795,30 @@ impl JoycodeResponsesSseNormalizer {
                     return;
                 }
                 if inner.starts_with("data:") {
+                    let data = inner.trim_start_matches("data:").trim_start();
+                    if self.drop_done && data == "[DONE]" {
+                        self.pending_event.take();
+                        return;
+                    }
                     if let Some(event) = self.pending_event.take() {
                         output.push_str(&event);
                         output.push('\n');
                     }
-                    self.observe_data(inner.trim_start_matches("data:").trim_start());
+                    self.observe_data(data);
                     output.push_str(inner);
                     output.push_str("\n\n");
                     return;
                 }
             }
+        }
+        if self.drop_done
+            && trimmed.lines().all(|line| {
+                crate::proxy::sse::strip_sse_field(line.trim_end_matches('\r'), "data")
+                    .is_some_and(|data| data.trim() == "[DONE]")
+            })
+        {
+            self.pending_event.take();
+            return;
         }
         if let Some(event) = self.pending_event.take() {
             output.push_str(&event);
@@ -1813,26 +1846,14 @@ impl JoycodeResponsesSseNormalizer {
     }
 }
 
-pub async fn normalize_responses_response(
+fn normalize_joycode_sse_response(
     response: ProxyResponse,
-    is_streaming: bool,
-    context: Option<JoycodeResponseSessionContext>,
-) -> Result<ProxyResponse, ProxyError> {
+    normalizer: JoycodeResponsesSseNormalizer,
+) -> ProxyResponse {
     let status = response.status();
     let mut headers = response.headers().clone();
     headers.remove(http::header::CONTENT_LENGTH);
-    if !is_streaming || response.is_json() {
-        let bytes = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
-        if let Ok(payload) = serde_json::from_slice::<Value>(&bytes) {
-            if let Some(context) = context.as_ref() {
-                record_completed_response(context, &payload);
-            }
-        }
-        return Ok(ProxyResponse::buffered(status, headers, bytes));
-    }
-
     let stream = Box::pin(response.bytes_stream());
-    let normalizer = JoycodeResponsesSseNormalizer::with_session_context(context);
     let normalized = futures::stream::unfold(
         (stream, normalizer, false),
         |(mut stream, mut normalizer, finished)| async move {
@@ -1862,7 +1883,45 @@ pub async fn normalize_responses_response(
             }
         },
     );
-    Ok(ProxyResponse::streamed(status, headers, normalized))
+    ProxyResponse::streamed(status, headers, normalized)
+}
+
+/// JoyCode's Anthropic adapter may wrap every already-serialized SSE line in
+/// another `data:` field. Unwrap that outer layer so Anthropic clients receive
+/// named `event:` fields instead of treating them as opaque data.
+pub async fn normalize_anthropic_response(
+    response: ProxyResponse,
+    is_streaming: bool,
+) -> Result<ProxyResponse, ProxyError> {
+    if !is_streaming || !response.is_sse() {
+        return Ok(response);
+    }
+    Ok(normalize_joycode_sse_response(
+        response,
+        JoycodeResponsesSseNormalizer::for_anthropic(),
+    ))
+}
+
+pub async fn normalize_responses_response(
+    response: ProxyResponse,
+    is_streaming: bool,
+    context: Option<JoycodeResponseSessionContext>,
+) -> Result<ProxyResponse, ProxyError> {
+    let status = response.status();
+    let mut headers = response.headers().clone();
+    headers.remove(http::header::CONTENT_LENGTH);
+    if !is_streaming || response.is_json() {
+        let bytes = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
+        if let Ok(payload) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(context) = context.as_ref() {
+                record_completed_response(context, &payload);
+            }
+        }
+        return Ok(ProxyResponse::buffered(status, headers, bytes));
+    }
+
+    let normalizer = JoycodeResponsesSseNormalizer::with_session_context(context);
+    Ok(normalize_joycode_sse_response(response, normalizer))
 }
 
 /// JoyCode may return an authentication envelope with HTTP 200. Detect it
@@ -2691,6 +2750,22 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_body_drops_unsupported_context_management() {
+        let mut body = json!({
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hello"}],
+            "context_management": {"edits": [{"type": "clear_thinking_20251015"}]},
+            "output_config": {"effort": "high"}
+        });
+
+        decorate_body(&mut body, JoycodeWireApi::Anthropic);
+
+        assert!(body.get("context_management").is_none());
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["client"], JOYCODE_CLIENT);
+    }
+
+    #[test]
     fn response_chain_removes_exact_replayed_prefix() {
         let previous_input =
             vec![json!({"role":"user","content":[{"type":"input_text","text":"hello"}]})];
@@ -2814,5 +2889,31 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("\"text\":\"hello\""));
         assert!(output.contains("\"totalTokenCount\":7"));
+    }
+
+    #[test]
+    fn unwraps_joycode_nested_anthropic_sse_and_drops_done() {
+        let mut normalizer = JoycodeResponsesSseNormalizer::for_anthropic();
+        let input = concat!(
+            "data: event: message_start\n\n",
+            "data: data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n\n",
+            "data: event: content_block_delta\n\n",
+            "data: data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n",
+            "data: event: message_stop\n\n",
+            "data: data: {\"type\":\"message_stop\"}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let split = input.len() / 2;
+        let mut output = normalizer.push_bytes(&input.as_bytes()[..split]);
+        output.extend(normalizer.push_bytes(&input.as_bytes()[split..]));
+        output.extend(normalizer.finish());
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.starts_with("event: message_start\ndata: {"));
+        assert!(output.contains("event: content_block_delta\n"));
+        assert!(output.contains("event: message_stop\ndata: {\"type\":\"message_stop\"}"));
+        assert!(!output.contains("data: event:"));
+        assert!(!output.contains("data: data:"));
+        assert!(!output.contains("[DONE]"));
     }
 }
