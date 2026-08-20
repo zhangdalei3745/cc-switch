@@ -116,6 +116,8 @@ describe("JoycodeConnectionFields", () => {
       },
     ]);
     expect(await screen.findByText("joy-model")).toBeInTheDocument();
+    expect(screen.getByText("Responses")).toBeInTheDocument();
+    expect(screen.getByText(/协议由 JoyCode 模型目录决定/)).toBeInTheDocument();
   });
 
   it("shows the actionable backend reason when model discovery fails", async () => {

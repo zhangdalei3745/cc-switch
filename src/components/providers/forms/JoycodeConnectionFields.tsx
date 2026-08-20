@@ -314,16 +314,31 @@ export function JoycodeConnectionFields({
         </Button>
       </div>
       {models.length > 0 && (
-        <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto">
-          {models.map((model) => (
-            <span
-              key={model.id}
-              title={model.wireApi}
-              className="rounded bg-muted px-2 py-1 text-xs text-muted-foreground"
-            >
-              {model.id}
-            </span>
-          ))}
+        <div className="space-y-2">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("joycode.modelProtocolHint", {
+              defaultValue:
+                "协议由 JoyCode 模型目录决定；开启路由接管后，Claude 与 Codex 会按选中模型自动转换，无需配置全局协议。",
+            })}
+          </p>
+          <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+            {models.map((model) => (
+              <span
+                key={model.id}
+                title={model.wireApi}
+                className="inline-flex items-center gap-1 rounded bg-muted px-2 py-1 text-xs text-muted-foreground"
+              >
+                <span>{model.id}</span>
+                <span className="rounded-sm border border-border/60 bg-background/60 px-1 text-[10px] font-medium">
+                  {model.wireApi === "responses"
+                    ? "Responses"
+                    : model.wireApi === "anthropic"
+                      ? "Anthropic"
+                      : "Chat"}
+                </span>
+              </span>
+            ))}
+          </div>
         </div>
       )}
       <p className="text-xs text-muted-foreground">

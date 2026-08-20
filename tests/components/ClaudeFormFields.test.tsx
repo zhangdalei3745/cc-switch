@@ -195,4 +195,30 @@ describe("ClaudeFormFields", () => {
       "shared-model[1M]",
     );
   });
+
+  it("JoyCode 显示可编辑模型映射并复用已获取的模型目录", () => {
+    renderCopilotForm({
+      isCopilotPreset: false,
+      usesOAuth: false,
+      category: "cn_official",
+      isJoycodeProvider: true,
+      modelSuggestions: [
+        { id: "Claude-Sonnet-4.6-hq", ownedBy: "JoyCode · Anthropic" },
+        { id: "GPT-5.6 Sol", ownedBy: "JoyCode · Responses" },
+      ],
+      defaultSonnetModel: "Claude-Sonnet-4.6-hq",
+      defaultSonnetModelName: "Claude-Sonnet-4.6-hq",
+    });
+
+    expect(
+      screen.getByText(/将 Claude 的模型角色映射到 JoyCode 实际模型/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "providerForm.fetchModels" }),
+    ).not.toBeInTheDocument();
+
+    expect(
+      screen.getAllByRole("button", { name: "Select model" }),
+    ).not.toHaveLength(0);
+  });
 });

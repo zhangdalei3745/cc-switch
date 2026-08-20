@@ -71,6 +71,10 @@ interface EndpointCandidate {
 
 interface ClaudeFormFieldsProps {
   providerId?: string;
+  /** JoyCode selects its upstream wire protocol from the signed model catalog. */
+  isJoycodeProvider?: boolean;
+  /** Models loaded by a provider-specific discovery flow such as JoyCode. */
+  modelSuggestions?: FetchedModel[];
   // API Key
   shouldShowApiKey: boolean;
   apiKey: string;
@@ -163,6 +167,8 @@ interface ClaudeFormFieldsProps {
 
 export function ClaudeFormFields({
   providerId,
+  isJoycodeProvider = false,
+  modelSuggestions = [],
   shouldShowApiKey,
   apiKey,
   onApiKeyChange,
@@ -237,7 +243,7 @@ export function ClaudeFormFields({
     defaultOpusModel ||
     defaultFableModel ||
     subagentModel ||
-    (!isXaiOauthPreset && apiFormat !== "anthropic") ||
+    (!isJoycodeProvider && !isXaiOauthPreset && apiFormat !== "anthropic") ||
     apiKeyField !== "ANTHROPIC_AUTH_TOKEN" ||
     customUserAgent ||
     hasRequestOverrides
@@ -550,6 +556,19 @@ export function ClaudeFormFields({
       );
     }
 
+    if (isJoycodeProvider) {
+      return (
+        <ModelInputWithFetch
+          id={id}
+          value={value}
+          onChange={updateValue}
+          placeholder={placeholder}
+          fetchedModels={modelSuggestions}
+          isLoading={false}
+        />
+      );
+    }
+
     // 普通供应商: 使用 ModelInputWithFetch（获取按钮在 section 标题旁）
     return (
       <ModelInputWithFetch
@@ -809,80 +828,85 @@ export function ClaudeFormFields({
           )}
           <CollapsibleContent className="space-y-4 pt-2">
             {/* 上游格式选择（仅非云服务商显示） */}
-            {category !== "cloud_provider" && !isXaiOauthPreset && (
+            {category !== "cloud_provider" &&
+              !isXaiOauthPreset &&
+              !isJoycodeProvider && (
+                <div className="space-y-2">
+                  <FormLabel htmlFor="apiFormat">
+                    {t("providerForm.apiFormat", { defaultValue: "上游格式" })}
+                  </FormLabel>
+                  <Select value={apiFormat} onValueChange={onApiFormatChange}>
+                    <SelectTrigger id="apiFormat" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="anthropic">
+                        {t("providerForm.apiFormatAnthropic", {
+                          defaultValue: "Anthropic Messages (原生)",
+                        })}
+                      </SelectItem>
+                      <SelectItem value="openai_chat">
+                        {t("providerForm.apiFormatOpenAIChat", {
+                          defaultValue: "OpenAI Chat Completions (需转换)",
+                        })}
+                      </SelectItem>
+                      <SelectItem value="openai_responses">
+                        {t("providerForm.apiFormatOpenAIResponses", {
+                          defaultValue: "OpenAI Responses API (需转换)",
+                        })}
+                      </SelectItem>
+                      <SelectItem value="gemini_native">
+                        {t("providerForm.apiFormatGeminiNative", {
+                          defaultValue:
+                            "Gemini Native generateContent (需转换)",
+                        })}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {t("providerForm.apiFormatHint", {
+                      defaultValue:
+                        "供应商原生为 Anthropic Messages API 就选 Anthropic Messages（直连，不转换格式）；使用 Chat Completions 协议就选 Chat；使用 Responses API 就选 Responses；使用 Gemini generateContent 协议就选 Gemini Native。Chat、Responses 与 Gemini Native 均需开启路由接管才能转换为 Anthropic Messages。",
+                    })}
+                  </p>
+                </div>
+              )}
+
+            {/* 认证字段选择器 */}
+            {!isJoycodeProvider && (
               <div className="space-y-2">
-                <FormLabel htmlFor="apiFormat">
-                  {t("providerForm.apiFormat", { defaultValue: "上游格式" })}
+                <FormLabel>
+                  {t("providerForm.authField", { defaultValue: "认证字段" })}
                 </FormLabel>
-                <Select value={apiFormat} onValueChange={onApiFormatChange}>
-                  <SelectTrigger id="apiFormat" className="w-full">
+                <Select
+                  value={apiKeyField}
+                  onValueChange={(v) =>
+                    onApiKeyFieldChange(v as ClaudeApiKeyField)
+                  }
+                >
+                  <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="anthropic">
-                      {t("providerForm.apiFormatAnthropic", {
-                        defaultValue: "Anthropic Messages (原生)",
+                    <SelectItem value="ANTHROPIC_AUTH_TOKEN">
+                      {t("providerForm.authFieldAuthToken", {
+                        defaultValue: "ANTHROPIC_AUTH_TOKEN（默认）",
                       })}
                     </SelectItem>
-                    <SelectItem value="openai_chat">
-                      {t("providerForm.apiFormatOpenAIChat", {
-                        defaultValue: "OpenAI Chat Completions (需转换)",
-                      })}
-                    </SelectItem>
-                    <SelectItem value="openai_responses">
-                      {t("providerForm.apiFormatOpenAIResponses", {
-                        defaultValue: "OpenAI Responses API (需转换)",
-                      })}
-                    </SelectItem>
-                    <SelectItem value="gemini_native">
-                      {t("providerForm.apiFormatGeminiNative", {
-                        defaultValue: "Gemini Native generateContent (需转换)",
+                    <SelectItem value="ANTHROPIC_API_KEY">
+                      {t("providerForm.authFieldApiKey", {
+                        defaultValue: "ANTHROPIC_API_KEY",
                       })}
                     </SelectItem>
                   </SelectContent>
                 </Select>
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  {t("providerForm.apiFormatHint", {
-                    defaultValue:
-                      "供应商原生为 Anthropic Messages API 就选 Anthropic Messages（直连，不转换格式）；使用 Chat Completions 协议就选 Chat；使用 Responses API 就选 Responses；使用 Gemini generateContent 协议就选 Gemini Native。Chat、Responses 与 Gemini Native 均需开启路由接管才能转换为 Anthropic Messages。",
+                <p className="text-xs text-muted-foreground">
+                  {t("providerForm.authFieldHint", {
+                    defaultValue: "选择写入配置的认证环境变量名",
                   })}
                 </p>
               </div>
             )}
-
-            {/* 认证字段选择器 */}
-            <div className="space-y-2">
-              <FormLabel>
-                {t("providerForm.authField", { defaultValue: "认证字段" })}
-              </FormLabel>
-              <Select
-                value={apiKeyField}
-                onValueChange={(v) =>
-                  onApiKeyFieldChange(v as ClaudeApiKeyField)
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ANTHROPIC_AUTH_TOKEN">
-                    {t("providerForm.authFieldAuthToken", {
-                      defaultValue: "ANTHROPIC_AUTH_TOKEN（默认）",
-                    })}
-                  </SelectItem>
-                  <SelectItem value="ANTHROPIC_API_KEY">
-                    {t("providerForm.authFieldApiKey", {
-                      defaultValue: "ANTHROPIC_API_KEY",
-                    })}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {t("providerForm.authFieldHint", {
-                  defaultValue: "选择写入配置的认证环境变量名",
-                })}
-              </p>
-            </div>
 
             {/* 模型映射 */}
             <div className="space-y-1 border-t border-border-default pt-2">
@@ -937,25 +961,32 @@ export function ClaudeFormFields({
                       defaultValue: "一键设置",
                     })}
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={handleModelFetchClick}
-                    disabled={modelFetchLoading}
-                    className="h-7 gap-1"
-                  >
-                    {modelFetchLoading ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Download className="h-3.5 w-3.5" />
-                    )}
-                    {t("providerForm.fetchModels")}
-                  </Button>
+                  {!isJoycodeProvider && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleModelFetchClick}
+                      disabled={modelFetchLoading}
+                      className="h-7 gap-1"
+                    >
+                      {modelFetchLoading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5" />
+                      )}
+                      {t("providerForm.fetchModels")}
+                    </Button>
+                  )}
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">
-                {t("providerForm.modelMappingHint")}
+                {isJoycodeProvider
+                  ? t("joycode.claudeModelMappingHint", {
+                      defaultValue:
+                        "将 Claude 的模型角色映射到 JoyCode 实际模型；选中后会按模型目录自动适配 Anthropic Messages、Responses 或 Chat Completions 协议。",
+                    })
+                  : t("providerForm.modelMappingHint")}
               </p>
             </div>
 

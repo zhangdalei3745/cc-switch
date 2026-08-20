@@ -654,6 +654,7 @@ function ProviderFormFull({
       tenant: initialData?.meta?.joycodeTenant,
       externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
     }));
+  const [joycodeModels, setJoycodeModels] = useState<JoycodeFetchedModel[]>([]);
   useEffect(() => {
     setJoycodeNetwork(
       initialData?.meta?.joycodeNetwork === "external"
@@ -665,6 +666,7 @@ function ProviderFormFull({
       tenant: initialData?.meta?.joycodeTenant,
       externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
     });
+    setJoycodeModels([]);
   }, [appId, initialData]);
 
   const {
@@ -1055,6 +1057,7 @@ function ProviderFormFull({
 
   const handleJoycodeCredential = useCallback(
     (ptKey: string, metadata?: JoycodeCredentialMetadata) => {
+      setJoycodeModels([]);
       if (metadata) setJoycodeCredentialMetadata(metadata);
       if (appId === "codex") handleCodexApiKeyChange(ptKey);
       else if (appId === "gemini") handleGeminiApiKeyChange(ptKey);
@@ -1078,6 +1081,7 @@ function ProviderFormFull({
 
   const handleJoycodeModelsLoaded = useCallback(
     (models: JoycodeFetchedModel[]) => {
+      setJoycodeModels(models);
       if (models.length === 0) return;
 
       const latestMatching = (token: string) =>
@@ -2293,7 +2297,10 @@ function ProviderFormFull({
             <JoycodeConnectionFields
               providerId={providerId}
               network={joycodeNetwork}
-              onNetworkChange={setJoycodeNetwork}
+              onNetworkChange={(network) => {
+                setJoycodeNetwork(network);
+                setJoycodeModels([]);
+              }}
               credential={
                 appId === "codex"
                   ? codexApiKey
@@ -2516,10 +2523,21 @@ function ProviderFormFull({
             }
           />
 
-          {appId === "claude" && !isJoycodeProvider && (
+          {appId === "claude" && (
             <ClaudeFormFields
               providerId={providerId}
+              isJoycodeProvider={isJoycodeProvider}
+              modelSuggestions={joycodeModels.map((model) => ({
+                id: model.id,
+                ownedBy:
+                  model.wireApi === "responses"
+                    ? "JoyCode · Responses"
+                    : model.wireApi === "anthropic"
+                      ? "JoyCode · Anthropic"
+                      : "JoyCode · Chat",
+              }))}
               shouldShowApiKey={
+                !isJoycodeProvider &&
                 (category !== "cloud_provider" ||
                   hasApiKeyField(form.getValues("settingsConfig"), "claude")) &&
                 shouldShowApiKey(form.getValues("settingsConfig"), isEditMode)
@@ -2556,7 +2574,7 @@ function ProviderFormFull({
               templateValues={templateValues}
               templatePresetName={templatePreset?.name || ""}
               onTemplateValueChange={handleTemplateValueChange}
-              shouldShowSpeedTest={shouldShowSpeedTest}
+              shouldShowSpeedTest={shouldShowSpeedTest && !isJoycodeProvider}
               baseUrl={baseUrl}
               onBaseUrlChange={handleClaudeBaseUrlChange}
               isEndpointModalOpen={isEndpointModalOpen}
@@ -2566,7 +2584,7 @@ function ProviderFormFull({
               }
               autoSelect={endpointAutoSelect}
               onAutoSelectChange={setEndpointAutoSelect}
-              showEndpointTools
+              showEndpointTools={!isJoycodeProvider}
               shouldShowModelSelector={category !== "official"}
               claudeModel={claudeModel}
               defaultHaikuModel={defaultHaikuModel}
@@ -2595,9 +2613,10 @@ function ProviderFormFull({
             />
           )}
 
-          {appId === "codex" && !isJoycodeProvider && (
+          {appId === "codex" && (
             <CodexFormFields
               providerId={providerId}
+              isJoycodeProvider={isJoycodeProvider}
               isXaiOauthPreset={
                 presetProviderType === "xai_oauth" ||
                 initialData?.meta?.providerType === "xai_oauth"
@@ -2634,7 +2653,7 @@ function ProviderFormFull({
               codexOauthRequireExplicitSelection={
                 requiresExplicitCodexOfficialSelection
               }
-              shouldShowSpeedTest={shouldShowSpeedTest}
+              shouldShowSpeedTest={shouldShowSpeedTest && !isJoycodeProvider}
               codexBaseUrl={codexBaseUrl}
               onBaseUrlChange={handleCodexBaseUrlChange}
               isFullUrl={localIsFullUrl}
