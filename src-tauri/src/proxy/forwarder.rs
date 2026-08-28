@@ -1710,9 +1710,12 @@ impl RequestForwarder {
             // client-requested budget. The final field name depends on the
             // already-selected upstream protocol.
             if let Some(limit) = route.max_output_tokens.filter(|limit| *limit > 0) {
+                // Claude 模型通过 Chat 接口访问时需要使用 max_completion_tokens
+                let is_claude = route.id.to_lowercase().starts_with("claude");
                 let field = match route.wire_api {
                     super::providers::joycode::JoycodeWireApi::Responses => "max_output_tokens",
                     super::providers::joycode::JoycodeWireApi::Anthropic => "max_tokens",
+                    super::providers::joycode::JoycodeWireApi::Chat if is_claude => "max_completion_tokens",
                     super::providers::joycode::JoycodeWireApi::Chat => "max_tokens",
                 };
                 let requested = request_body.get(field).and_then(Value::as_u64);
