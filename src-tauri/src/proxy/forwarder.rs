@@ -1715,7 +1715,9 @@ impl RequestForwarder {
                 let field = match route.wire_api {
                     super::providers::joycode::JoycodeWireApi::Responses => "max_output_tokens",
                     super::providers::joycode::JoycodeWireApi::Anthropic => "max_tokens",
-                    super::providers::joycode::JoycodeWireApi::Chat if is_claude => "max_completion_tokens",
+                    super::providers::joycode::JoycodeWireApi::Chat if is_claude => {
+                        "max_completion_tokens"
+                    }
                     super::providers::joycode::JoycodeWireApi::Chat => "max_tokens",
                 };
                 let requested = request_body.get(field).and_then(Value::as_u64);
