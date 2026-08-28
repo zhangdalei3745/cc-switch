@@ -54,7 +54,13 @@ describe("JoycodeConnectionFields", () => {
 
   it("uses a manual password field instead of opening a web login", () => {
     const onCredential = vi.fn();
-    render(<ControlledFields onCredential={onCredential} />);
+    const onModelsLoaded = vi.fn();
+    render(
+      <ControlledFields
+        onCredential={onCredential}
+        onModelsLoaded={onModelsLoaded}
+      />,
+    );
 
     expect(
       screen.queryByRole("button", { name: "打开 JoyCode 登录并自动导入" }),
@@ -67,6 +73,7 @@ describe("JoycodeConnectionFields", () => {
     fireEvent.change(input, { target: { value: "  BJ.manual-key  " } });
 
     expect(onCredential).toHaveBeenLastCalledWith("BJ.manual-key");
+    expect(onModelsLoaded).toHaveBeenCalledWith([]);
     expect(input).toHaveValue("BJ.manual-key");
     expect(screen.getByRole("button", { name: "获取模型" })).toBeEnabled();
   });

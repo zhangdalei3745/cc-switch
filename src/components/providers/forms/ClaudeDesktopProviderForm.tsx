@@ -50,6 +50,7 @@ import {
   fetchModelsForConfig,
   showFetchModelsError,
   type FetchedModel,
+  type JoycodeFetchedModel,
 } from "@/lib/api/model-fetch";
 import {
   providersApi,
@@ -208,6 +209,47 @@ function normalizeProxyRows(rows: RouteRow[]): RouteRow[] {
       model: match?.model ?? "",
       labelOverride: match?.labelOverride ?? "",
       supports1m: match?.supports1m ?? false,
+    });
+  });
+}
+
+function latestJoycodeModel(
+  models: JoycodeFetchedModel[],
+  family: "sonnet" | "opus" | "haiku",
+) {
+  return models
+    .filter((model) => model.id.toLowerCase().includes(family))
+    .sort((left, right) =>
+      right.id.localeCompare(left.id, undefined, { numeric: true }),
+    )[0];
+}
+
+/**
+ * 将 JoyCode 的动态模型目录投影到 Claude Desktop 固定的四档角色。
+ * Fable 当前没有稳定的 JoyCode 同名模型，沿用 Sonnet；缺少 Haiku/Opus 时
+ * 同样回退 Sonnet，确保 Claude Desktop 的后台子任务始终能解析到可用模型。
+ */
+function joycodeCatalogToProxyRows(models: JoycodeFetchedModel[]): RouteRow[] {
+  if (models.length === 0) return [];
+
+  const sonnet = latestJoycodeModel(models, "sonnet");
+  const opus = latestJoycodeModel(models, "opus");
+  const haiku = latestJoycodeModel(models, "haiku");
+  const fallback = sonnet ?? opus ?? models[0];
+  const selected = {
+    sonnet: sonnet ?? fallback,
+    opus: opus ?? sonnet ?? fallback,
+    fable: sonnet ?? opus ?? fallback,
+    haiku: haiku ?? sonnet ?? fallback,
+  } satisfies Record<RouteRole, JoycodeFetchedModel>;
+
+  return ROLE_ORDER.map((role) => {
+    const model = selected[role];
+    return createRouteRow({
+      route: ROLE_ROUTE_IDS[role],
+      model: model.id,
+      labelOverride: model.id,
+      supports1m: (model.contextWindow ?? 0) >= 1_000_000,
     });
   });
 }
@@ -428,6 +470,7 @@ export function ClaudeDesktopProviderForm({
   });
 
   const applyDesktopPreset = (preset: ClaudeDesktopProviderPreset) => {
+    setFetchedModels([]);
     form.setValue("name", preset.nameKey ? t(preset.nameKey) : preset.name);
     form.setValue("websiteUrl", preset.websiteUrl);
     form.setValue("notes", "");
@@ -577,6 +620,26 @@ export function ClaudeDesktopProviderForm({
       });
     } finally {
       setIsFetchingModels(false);
+    }
+  };
+
+  const handleJoycodeModelsLoaded = (models: JoycodeFetchedModel[]) => {
+    setFetchedModels(
+      models.map((model) => ({
+        id: model.id,
+        ownedBy:
+          model.wireApi === "responses"
+            ? "JoyCode · Responses"
+            : model.wireApi === "anthropic"
+              ? "JoyCode · Anthropic"
+              : "JoyCode · Chat",
+      })),
+    );
+
+    const syncedRoutes = joycodeCatalogToProxyRows(models);
+    if (syncedRoutes.length > 0) {
+      didSeedDefaultProxyRoutes.current = true;
+      setProxyRoutes(syncedRoutes);
     }
   };
 
@@ -851,7 +914,7 @@ export function ClaudeDesktopProviderForm({
 
   const renderActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
-      {!usesManagedOAuth && (
+      {!usesManagedOAuth && !isJoycodeProvider && (
         <Button
           type="button"
           variant="outline"
@@ -908,6 +971,7 @@ export function ClaudeDesktopProviderForm({
               if (metadata) setJoycodeCredentialMetadata(metadata);
               setApiKey(ptKey);
             }}
+            onModelsLoaded={handleJoycodeModelsLoaded}
           />
         )}
 
@@ -1104,7 +1168,7 @@ export function ClaudeDesktopProviderForm({
                             defaultValue: "模型映射",
                           })}
                         </Label>
-                        {!usesManagedOAuth && (
+                        {!usesManagedOAuth && !isJoycodeProvider && (
                           <Button
                             type="button"
                             variant="outline"
