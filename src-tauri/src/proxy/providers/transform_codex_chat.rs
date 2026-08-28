@@ -291,7 +291,9 @@ pub fn responses_to_chat_completions_with_reasoning(
 
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(max_tokens) = body.get("max_output_tokens") {
-        if super::transform::is_openai_o_series(model) {
+        // OpenAI o-series 和 Claude 模型需要使用 max_completion_tokens
+        // Claude 模型通过 Joycode 等网关访问时也不支持 max_tokens
+        if super::transform::is_openai_o_series(model) || super::transform::is_claude_model(model) {
             result["max_completion_tokens"] = max_tokens.clone();
         } else {
             result["max_tokens"] = max_tokens.clone();
