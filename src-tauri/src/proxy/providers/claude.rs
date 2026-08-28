@@ -438,6 +438,19 @@ pub fn transform_claude_request_for_api_format(
                 body,
                 preserve_reasoning_content,
             )?;
+            // Joycode Claude 模型通过 Chat 接口访问时需要使用 max_completion_tokens
+            if provider.is_joycode() {
+                if let Some(model) = result.get("model").and_then(|m| m.as_str()) {
+                    if model.to_lowercase().starts_with("claude") {
+                        if let Some(max_tokens) = result.get("max_tokens").cloned() {
+                            result["max_completion_tokens"] = max_tokens;
+                            if let Some(obj) = result.as_object_mut() {
+                                obj.remove("max_tokens");
+                            }
+                        }
+                    }
+                }
+            }
             // Inject prompt_cache_key only if explicitly configured in meta
             if let Some(key) = provider
                 .meta
