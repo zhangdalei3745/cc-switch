@@ -61,7 +61,6 @@ pub fn is_openai_o_series(model: &str) -> bool {
         && model.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
 }
 
-
 /// Detect Claude models (claude-3, claude-sonnet, claude-opus, etc.)
 /// These models require `max_completion_tokens` instead of `max_tokens`
 /// when accessed through OpenAI-compatible endpoints (e.g., Joycode gateway).
