@@ -12,6 +12,13 @@ const authState = vi.hoisted(() => ({
 const toastMocks = vi.hoisted(() => ({
   error: vi.fn(),
 }));
+const modelFetchMocks = vi.hoisted(() => ({
+  fetchModelsForConfig: vi.fn(),
+  fetchJoycodeModels: vi.fn(),
+  importJoycodeCredential: vi.fn(),
+  validateJoycodeCredential: vi.fn(),
+  showFetchModelsError: vi.fn(),
+}));
 
 vi.mock("sonner", () => ({
   toast: {
@@ -66,6 +73,14 @@ vi.mock("@/lib/api/providers", () => ({
   },
 }));
 
+vi.mock("@/lib/api/model-fetch", () => ({
+  fetchModelsForConfig: modelFetchMocks.fetchModelsForConfig,
+  fetchJoycodeModels: modelFetchMocks.fetchJoycodeModels,
+  importJoycodeCredential: modelFetchMocks.importJoycodeCredential,
+  validateJoycodeCredential: modelFetchMocks.validateJoycodeCredential,
+  showFetchModelsError: modelFetchMocks.showFetchModelsError,
+}));
+
 function renderForm(
   initialData: ComponentProps<typeof ClaudeDesktopProviderForm>["initialData"],
   onSubmit = vi.fn(),
@@ -86,7 +101,75 @@ function renderForm(
 
 describe("ClaudeDesktopProviderForm", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     authState.codexReauthRequired = false;
+    modelFetchMocks.fetchModelsForConfig.mockResolvedValue([]);
+    modelFetchMocks.fetchJoycodeModels.mockResolvedValue([]);
+    modelFetchMocks.importJoycodeCredential.mockResolvedValue(null);
+  });
+
+  it("JoyCode 一键获取完整目录并同步到 Claude Desktop 模型映射", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    modelFetchMocks.fetchJoycodeModels.mockResolvedValue([
+      {
+        id: "Claude-Sonnet-4.7-hq",
+        ownedBy: "joycode",
+        wireApi: "anthropic",
+        contextWindow: 1_000_000,
+      },
+      {
+        id: "Claude-Opus-4.8-hq",
+        ownedBy: "joycode",
+        wireApi: "anthropic",
+        contextWindow: 200_000,
+      },
+      {
+        id: "Claude-Haiku-4.5",
+        ownedBy: "joycode",
+        wireApi: "chat",
+        contextWindow: 200_000,
+      },
+      {
+        id: "GPT-5.6 Sol",
+        ownedBy: "joycode",
+        wireApi: "responses",
+        contextWindow: 200_000,
+      },
+    ]);
+    renderForm(undefined, onSubmit);
+
+    await user.click(screen.getByRole("button", { name: /JD Joycode/ }));
+    await user.type(screen.getByLabelText("JoyCode ptKey"), "BJ.test-key");
+    await user.click(screen.getByRole("button", { name: "获取模型" }));
+
+    expect(await screen.findByText("GPT-5.6 Sol")).toBeInTheDocument();
+    expect(screen.getAllByDisplayValue("Claude-Sonnet-4.7-hq")).toHaveLength(4);
+    expect(screen.getAllByDisplayValue("Claude-Opus-4.8-hq")).toHaveLength(2);
+    expect(screen.getAllByDisplayValue("Claude-Haiku-4.5")).toHaveLength(2);
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][0].meta.claudeDesktopModelRoutes).toEqual({
+      "claude-sonnet-5": {
+        model: "Claude-Sonnet-4.7-hq",
+        labelOverride: "Claude-Sonnet-4.7-hq",
+        supports1m: true,
+      },
+      "claude-opus-5": {
+        model: "Claude-Opus-4.8-hq",
+        labelOverride: "Claude-Opus-4.8-hq",
+      },
+      "claude-fable-5": {
+        model: "Claude-Sonnet-4.7-hq",
+        labelOverride: "Claude-Sonnet-4.7-hq",
+        supports1m: true,
+      },
+      "claude-haiku-4-5": {
+        model: "Claude-Haiku-4.5",
+        labelOverride: "Claude-Haiku-4.5",
+      },
+    });
   });
 
   it.each(["github_copilot", "codex_oauth", "xai_oauth"])(

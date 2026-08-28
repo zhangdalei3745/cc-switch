@@ -51,6 +51,11 @@ export function JoycodeConnectionFields({
   const [models, setModels] = useState<JoycodeFetchedModel[]>([]);
   const mountedRef = useRef(true);
 
+  const clearModels = () => {
+    setModels([]);
+    onModelsLoaded?.([]);
+  };
+
   useEffect(
     () => () => {
       mountedRef.current = false;
@@ -183,7 +188,7 @@ export function JoycodeConnectionFields({
           id="joycode-network"
           value={network}
           onChange={(event) => {
-            setModels([]);
+            clearModels();
             onNetworkChange(event.target.value as JoycodeNetwork);
           }}
           className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
@@ -245,7 +250,7 @@ export function JoycodeConnectionFields({
           autoComplete="off"
           value={credential}
           onChange={(event) => {
-            setModels([]);
+            clearModels();
             onCredential(event.target.value.trim(), {
               ...credentialMetadata,
               loginType: undefined,
@@ -264,7 +269,7 @@ export function JoycodeConnectionFields({
             id="joycode-login-type"
             value={credentialMetadata?.loginType ?? ""}
             onChange={(event) => {
-              setModels([]);
+              clearModels();
               onCredential(credential, {
                 ...credentialMetadata,
                 loginType: event.target.value || undefined,
