@@ -32,7 +32,8 @@ use super::{
             create_anthropic_sse_stream_from_responses_with_web_search_options,
         },
         transform, transform_codex_anthropic, transform_codex_chat,
-        transform_codex_responses_namespace, transform_gemini, transform_responses,
+        transform_codex_responses_namespace, transform_codex_responses_xai_sanitize,
+        transform_gemini, transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, create_usage_collector, process_response,
@@ -1123,15 +1124,11 @@ async fn handle_responses_for_app(
         .await;
     }
 
-    // Native Responses passthrough to a strict gateway (xAI): the request-side
-    // flatten (in the forwarder) turned Codex `namespace` tools into flat
-    // function tools, so the upstream returns flat function-call names. Restore
-    // them to `{name, namespace}` so the Codex client matches them against its
-    // namespaced tool registry.
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-        && !namespace_restore_map.is_empty()
-    {
-        return handle_codex_responses_namespace_restore(
+    // Native Responses passthrough to a strict gateway (xAI): restore flattened
+    // function-call names *and* rewrite whole-float tool arguments. The integer
+    // rewrite must run even when the request had no namespace tools.
+    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider) {
+        return handle_codex_xai_native_responses_rewrite(
             response,
             &ctx,
             &state,
@@ -1322,10 +1319,8 @@ async fn handle_responses_compact_for_app(
         .await;
     }
 
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-        && !namespace_restore_map.is_empty()
-    {
-        return handle_codex_responses_namespace_restore(
+    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider) {
+        return handle_codex_xai_native_responses_rewrite(
             response,
             &ctx,
             &state,
@@ -1345,12 +1340,11 @@ async fn handle_responses_compact_for_app(
     .await
 }
 
-/// Response handler for the native Responses passthrough to a strict gateway
-/// (xAI), restoring the flattened `function_call` names produced by the
-/// request-side namespace flatten. Success bodies only carry a light rename;
-/// error bodies and everything unrelated pass through unchanged. Usage is
-/// collected exactly as `process_response` would (same `CODEX_PARSER_CONFIG`).
-async fn handle_codex_responses_namespace_restore(
+/// Response handler for the native Responses passthrough to xAI: restore
+/// flattened `function_call` names and rewrite whole-float tool arguments.
+/// Error bodies pass through unchanged. Usage is collected exactly as
+/// `process_response` would (same `CODEX_PARSER_CONFIG`).
+async fn handle_codex_xai_native_responses_rewrite(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
     state: &ProxyState,
@@ -1380,7 +1374,7 @@ async fn handle_codex_responses_namespace_restore(
         }
 
         let restore_stream =
-            transform_codex_responses_namespace::create_namespace_restore_sse_stream(
+            transform_codex_responses_xai_sanitize::create_xai_native_responses_sse_stream(
                 response.bytes_stream(),
                 restore_map,
             );
@@ -1422,6 +1416,9 @@ async fn handle_codex_responses_namespace_restore(
             transform_codex_responses_namespace::restore_response_namespaces(
                 &mut value,
                 &restore_map,
+            );
+            transform_codex_responses_xai_sanitize::normalize_xai_function_call_integer_arguments(
+                &mut value,
             );
             if let Some(usage) =
                 TokenUsage::from_codex_response_auto(&value).filter(TokenUsage::has_billable_tokens)
