@@ -34,7 +34,7 @@ export interface CodexProviderPreset {
   // Codex API 格式
   apiFormat?: CodexApiFormat;
   // 仅用于区分预设来源；ChatGPT/Codex 与 xAI/Grok 的认证流程彼此独立。
-  providerType?: "codex_oauth" | "xai_oauth";
+  providerType?: "codex_oauth" | "xai_oauth" | "joycode";
   // OAuth 预设：隐藏 API Key 输入，保存前要求已登录托管账号
   requiresOAuth?: boolean;
   // Codex Chat 本地路由模式下的模型目录
@@ -140,6 +140,29 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     },
     icon: "openai",
     iconColor: "#00A67E",
+  },
+  {
+    name: "JD Joycode",
+    websiteUrl: "http://joycode.jd.com",
+    apiKeyUrl: "http://joycode.jd.com",
+    providerType: "joycode",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "JD Joycode",
+      "http://joycode-api-saas.jd.com",
+      "GPT-5.6 Sol",
+    ),
+    modelCatalog: modelCatalog([
+      {
+        model: "GPT-5.6 Sol",
+        displayName: "GPT-5.6 Sol",
+        contextWindow: 200000,
+      },
+    ]),
+    apiFormat: "openai_responses",
+    category: "cn_official",
+    icon: "joycode",
+    iconColor: "#E1251B",
   },
   // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
   {

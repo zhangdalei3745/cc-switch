@@ -117,6 +117,12 @@ export function providerNeedsRouting(
   appId: AppId,
   provider: Provider,
 ): boolean {
+  // JoyCode always requires the local gateway for dedicated authentication,
+  // per-model protocol routing, SSE normalization and session reuse. This must
+  // run before official-provider short circuits because Joycode presets may use
+  // an official category while still depending on the local gateway.
+  if (provider.meta?.providerType === "joycode") return true;
+
   if (
     provider.category === "official" ||
     resolveCodexOfficialIdentity(appId, provider)

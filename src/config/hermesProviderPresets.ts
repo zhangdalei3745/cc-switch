@@ -112,6 +112,7 @@ export interface HermesProviderPreset {
   icon?: string;
   iconColor?: string;
   isCustomTemplate?: boolean;
+  providerType?: "joycode";
   /** Optional top-level `model:` defaults written on switch. */
   suggestedDefaults?: HermesSuggestedDefaults;
 }
@@ -129,6 +130,25 @@ export interface HermesProviderSettingsConfig {
 }
 
 export const hermesProviderPresets: HermesProviderPreset[] = [
+  {
+    name: "JD Joycode",
+    websiteUrl: "http://joycode.jd.com",
+    apiKeyUrl: "http://joycode.jd.com",
+    providerType: "joycode",
+    settingsConfig: {
+      name: "jd_joycode",
+      base_url: "http://127.0.0.1:15721/hermes/v1",
+      api_key: "",
+      api_mode: "codex_responses",
+      models: [{ id: "joycode", name: "JoyCode（登录后获取模型）" }],
+    },
+    category: "cn_official",
+    icon: "joycode",
+    iconColor: "#E1251B",
+    suggestedDefaults: {
+      model: { default: "joycode", provider: "jd_joycode" },
+    },
+  },
   // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
   {
     name: "Kimi",

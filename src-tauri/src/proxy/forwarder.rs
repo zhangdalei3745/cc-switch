@@ -1171,8 +1171,40 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
-        // 使用适配器提取 base_url
-        let mut base_url = adapter.extract_base_url(provider)?;
+        self.forward_inner(
+            app_type, method, provider, endpoint, body, headers, extensions, adapter, false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_inner(
+        &self,
+        app_type: &AppType,
+        method: &http::Method,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+        headers: &axum::http::HeaderMap,
+        extensions: &Extensions,
+        adapter: &dyn ProviderAdapter,
+        joycode_runtime_retried: bool,
+    ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        let is_joycode = super::providers::joycode::is_joycode_provider(provider);
+        let joycode_pt_key = if is_joycode {
+            let (_configured_base, key) = provider.resolve_usage_credentials(app_type);
+            Some(super::providers::joycode::resolve_latest_pt_key(&key))
+        } else {
+            None
+        };
+
+        // JoyCode addresses are selected by its network enum. Other providers
+        // continue to use the application adapter's native config shape.
+        let mut base_url = if is_joycode {
+            super::providers::joycode::provider_base_url(provider)?
+        } else {
+            adapter.extract_base_url(provider)?
+        };
 
         let is_full_url = provider
             .meta
@@ -1193,9 +1225,11 @@ impl RequestForwarder {
         // Codex upstream conversion mode — computed early because the [1m]-suffix strip
         // below must be skipped on the Anthropic path (the marker has to survive to
         // catalog matching and to the transform's own strip+beta detection).
-        let codex_responses_to_chat = matches!(app_type, AppType::Codex | AppType::GrokBuild)
+        let mut codex_responses_to_chat = !is_joycode
+            && matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
-        let codex_responses_to_anthropic = matches!(app_type, AppType::Codex | AppType::GrokBuild)
+        let mut codex_responses_to_anthropic = !is_joycode
+            && matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint);
         let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
             && super::providers::is_codex_official_provider(provider);
@@ -1262,6 +1296,72 @@ impl RequestForwarder {
         // the optional Responses -> Chat/Anthropic bridge.
         if matches!(app_type, AppType::GrokBuild) {
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        }
+
+        // Resolve JoyCode's per-model wire protocol after every client-side
+        // alias/model mapping has run. A cache miss lazily refreshes the account
+        // catalog; model names are never used as protocol heuristics.
+        let joycode_model = if is_joycode {
+            let model = mapped_body
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    matches!(app_type, AppType::Gemini)
+                        .then(|| super::providers::joycode::model_from_gemini_endpoint(endpoint))
+                        .flatten()
+                })
+                .ok_or_else(|| {
+                    ProxyError::InvalidRequest(
+                        "JoyCode request must contain a model from the current catalog".to_string(),
+                    )
+                })?;
+            let route = super::providers::joycode::resolve_model(
+                provider,
+                &model,
+                joycode_pt_key.as_deref().unwrap_or_default(),
+                match app_type {
+                    AppType::Claude | AppType::ClaudeDesktop => {
+                        Some(super::providers::joycode::JoycodeWireApi::Anthropic)
+                    }
+                    AppType::Codex | AppType::GrokBuild => {
+                        Some(super::providers::joycode::JoycodeWireApi::Responses)
+                    }
+                    _ => None,
+                },
+            )
+            .await?;
+            mapped_body["model"] = Value::String(route.id.clone());
+            if matches!(
+                app_type,
+                AppType::Codex
+                    | AppType::GrokBuild
+                    | AppType::OpenCode
+                    | AppType::OpenClaw
+                    | AppType::Hermes
+                    | AppType::Pi
+            ) {
+                codex_responses_to_chat =
+                    route.wire_api == super::providers::joycode::JoycodeWireApi::Chat;
+                codex_responses_to_anthropic =
+                    route.wire_api == super::providers::joycode::JoycodeWireApi::Anthropic;
+            }
+            Some(route)
+        } else {
+            None
+        };
+
+        let joycode_gemini_ingress = is_joycode && matches!(app_type, AppType::Gemini);
+        if joycode_gemini_ingress {
+            let model = joycode_model
+                .as_ref()
+                .map(|route| route.id.as_str())
+                .unwrap_or("joycode");
+            let stream = endpoint.contains(":streamGenerateContent");
+            mapped_body =
+                super::providers::joycode::gemini_request_to_anthropic(mapped_body, model, stream)?;
         }
 
         if is_copilot {
@@ -1418,14 +1518,27 @@ impl RequestForwarder {
                 }
             }
         }
-        let resolved_claude_api_format = if adapter.name() == "Claude" {
-            Some(
-                self.resolve_claude_api_format(provider, &mapped_body, is_copilot)
-                    .await,
-            )
-        } else {
-            None
-        };
+        let resolved_claude_api_format =
+            if is_joycode && matches!(app_type, AppType::Claude | AppType::ClaudeDesktop) {
+                Some(
+                    match joycode_model.as_ref().map(|model| model.wire_api) {
+                        Some(super::providers::joycode::JoycodeWireApi::Responses) => {
+                            "openai_responses"
+                        }
+                        Some(super::providers::joycode::JoycodeWireApi::Anthropic) => "anthropic",
+                        Some(super::providers::joycode::JoycodeWireApi::Chat) => "openai_chat",
+                        None => "anthropic",
+                    }
+                    .to_string(),
+                )
+            } else if adapter.name() == "Claude" {
+                Some(
+                    self.resolve_claude_api_format(provider, &mapped_body, is_copilot)
+                        .await,
+                )
+            } else {
+                None
+            };
         if adapter.name() == "Claude" {
             if let Some(api_format) = resolved_claude_api_format.as_deref() {
                 super::providers::normalize_anthropic_messages_for_provider(
@@ -1484,7 +1597,10 @@ impl RequestForwarder {
         let is_codex_alpha_search = matches!(app_type, AppType::Codex)
             && split_endpoint_and_query(&effective_endpoint).0 == "/alpha/search";
 
-        let url = if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
+        let joycode_wire_api = joycode_model.as_ref().map(|model| model.wire_api);
+        let url = if let Some(wire_api) = joycode_wire_api {
+            super::providers::joycode::endpoint_for(provider, wire_api)?
+        } else if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
             super::gemini_url::resolve_gemini_native_url(
                 &base_url,
                 &effective_endpoint,
@@ -1514,8 +1630,28 @@ impl RequestForwarder {
         // suffix and add the context-1m beta header.
         let mut codex_anthropic_one_m = false;
 
+        if let Some(route) = joycode_model.as_ref() {
+            // Validate on the ingress/intermediate body before Chat conversion,
+            // where unsupported document blocks would otherwise be dropped.
+            super::providers::joycode::validate_media_for_wire(&mapped_body, route.wire_api)?;
+        }
+
         // 转换请求体（如果需要）
-        let mut request_body = if codex_responses_to_chat {
+        let mut request_body = if joycode_gemini_ingress {
+            let format = match joycode_wire_api {
+                Some(super::providers::joycode::JoycodeWireApi::Responses) => "openai_responses",
+                Some(super::providers::joycode::JoycodeWireApi::Chat) => "openai_chat",
+                _ => "anthropic",
+            };
+            super::providers::transform_claude_request_for_api_format(
+                mapped_body,
+                provider,
+                format,
+                self.session_client_provided
+                    .then_some(self.session_id.as_str()),
+                Some(self.gemini_shadow.as_ref()),
+            )?
+        } else if codex_responses_to_chat {
             let mut mapped_body = mapped_body;
             let explicit_prompt_cache_key = mapped_body
                 .get("prompt_cache_key")
@@ -1621,6 +1757,76 @@ impl RequestForwarder {
             mapped_body
         };
 
+        let joycode_stable_session_id = self
+            .session_client_provided
+            .then(|| self.session_id.clone())
+            .or_else(|| super::providers::joycode::stable_conversation_id(&request_body));
+        let mut joycode_chat_cache_key_injected = false;
+        if let Some(route) = joycode_model.as_ref() {
+            // Respect the model's output ceiling without inflating a smaller
+            // client-requested budget. The final field name depends on the
+            // already-selected upstream protocol.
+            if let Some(limit) = route.max_output_tokens.filter(|limit| *limit > 0) {
+                // Claude 模型通过 Chat 接口访问时需要使用 max_completion_tokens
+                let is_claude = route.id.to_lowercase().starts_with("claude");
+                let field = match route.wire_api {
+                    super::providers::joycode::JoycodeWireApi::Responses => "max_output_tokens",
+                    super::providers::joycode::JoycodeWireApi::Anthropic => "max_tokens",
+                    super::providers::joycode::JoycodeWireApi::Chat if is_claude => {
+                        "max_completion_tokens"
+                    }
+                    super::providers::joycode::JoycodeWireApi::Chat => "max_tokens",
+                };
+                let requested = request_body.get(field).and_then(Value::as_u64);
+                request_body[field] =
+                    Value::from(requested.map_or(limit, |value| value.min(limit)));
+            }
+
+            if route.wire_api == super::providers::joycode::JoycodeWireApi::Anthropic {
+                super::cache_injector::inject(
+                    &mut request_body,
+                    &codex_anthropic_cache_config(&self.optimizer_config),
+                );
+            } else if route.wire_api == super::providers::joycode::JoycodeWireApi::Chat
+                && joycode_stable_session_id.is_some()
+                && request_body.get("prompt_cache_key").is_none()
+                && super::providers::joycode::chat_prompt_cache_key_supported(provider, &route.id)
+            {
+                request_body["prompt_cache_key"] =
+                    Value::String(super::providers::joycode::prompt_cache_key(
+                        provider,
+                        joycode_pt_key.as_deref().unwrap_or_default(),
+                        app_type.as_str(),
+                        joycode_stable_session_id.as_deref().unwrap_or_default(),
+                        &route.id,
+                    ));
+                joycode_chat_cache_key_injected = true;
+            }
+            super::providers::joycode::decorate_body(&mut request_body, route.wire_api);
+        }
+        let joycode_response_session_context = joycode_model
+            .as_ref()
+            .and_then(|route| {
+                (route.wire_api == super::providers::joycode::JoycodeWireApi::Responses).then(
+                    || {
+                        super::providers::joycode::prepare_responses_session(
+                            provider,
+                            joycode_pt_key.as_deref().unwrap_or_default(),
+                            app_type.as_str(),
+                            joycode_stable_session_id.as_deref(),
+                            &mut request_body,
+                        )
+                    },
+                )
+            })
+            .flatten();
+        let joycode_response_chain_injected = joycode_response_session_context.is_some()
+            && request_body
+                .get("previous_response_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+            && body.get("previous_response_id").is_none();
+
         // Native Responses passthrough to a strict third-party gateway (xAI).
         // One gate so rebase conflicts stay here plus the isolate file, not
         // scattered across sanitizers. Flatten namespaces first; then apply
@@ -1686,6 +1892,25 @@ impl RequestForwarder {
             || codex_responses_to_chat
             || codex_responses_to_anthropic
             || request_is_streaming;
+
+        // Current JoyCode inference endpoints require a READY model-runtime
+        // token for every wire protocol. Use a client-provided/stable
+        // conversation id when available; the request-scoped proxy session is
+        // a safe fallback for clients that provide no stable identity.
+        let joycode_runtime_lease = if let Some(route) = joycode_model.as_ref() {
+            let chat_id = joycode_stable_session_id
+                .as_deref()
+                .unwrap_or(self.session_id.as_str());
+            super::providers::joycode::acquire_runtime_token(
+                provider,
+                joycode_pt_key.as_deref().unwrap_or_default(),
+                &route.id,
+                chat_id,
+            )
+            .await?
+        } else {
+            None
+        };
 
         // Codex OAuth 需要注入的 ChatGPT-Account-Id（在动态 token 获取期间填充）
         let mut codex_oauth_account_id: Option<String> = None;
@@ -1861,6 +2086,31 @@ impl RequestForwarder {
         } else {
             Vec::new()
         };
+
+        if is_joycode {
+            let pt_key = joycode_pt_key.as_deref().unwrap_or_default();
+            if !pt_key.is_empty() && !log_secrets.iter().any(|secret| secret == pt_key) {
+                log_secrets.push(pt_key.to_string());
+            }
+            auth_headers = super::providers::joycode::auth_headers_for_provider(provider, pt_key)?
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            if let Some(lease) = joycode_runtime_lease.as_ref() {
+                let token = lease.token();
+                if !log_secrets.iter().any(|secret| secret == token) {
+                    log_secrets.push(token.to_string());
+                }
+                auth_headers.push((
+                    http::HeaderName::from_static("x-model-token"),
+                    http::HeaderValue::from_str(token).map_err(|error| {
+                        ProxyError::AuthError(format!(
+                            "Invalid JoyCode model runtime token: {error}"
+                        ))
+                    })?,
+                ));
+            }
+        }
 
         let codex_oauth_session_headers =
             if should_send_codex_oauth_session_headers && self.session_client_provided {
@@ -2374,6 +2624,63 @@ impl RequestForwarder {
             let mut response = self
                 .prepare_success_response_for_failover(response, request_is_streaming)
                 .await?;
+            if is_joycode && request_is_streaming && !response.is_json() {
+                match self.validate_joycode_runtime_stream_start(response).await {
+                    Ok(validated) => response = validated,
+                    Err(error)
+                        if !joycode_runtime_retried
+                            && proxy_error_is_joycode_runtime_token_error(&error) =>
+                    {
+                        if let Some(lease) = joycode_runtime_lease.as_ref() {
+                            super::providers::joycode::invalidate_runtime_token(lease).await;
+                        }
+                        log::info!(
+                            "[JoyCode] runtime token rejected at stream start; requeueing once"
+                        );
+                        return Box::pin(self.forward_inner(
+                            app_type, method, provider, endpoint, body, headers, extensions,
+                            adapter, true,
+                        ))
+                        .await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if is_joycode && response.is_json() {
+                match super::providers::joycode::validate_auth_envelope(response).await {
+                    Ok(validated) => response = validated,
+                    Err(error)
+                        if !joycode_runtime_retried
+                            && proxy_error_is_joycode_runtime_token_error(&error) =>
+                    {
+                        if let Some(lease) = joycode_runtime_lease.as_ref() {
+                            super::providers::joycode::invalidate_runtime_token(lease).await;
+                        }
+                        log::info!("[JoyCode] runtime token rejected; requeueing once");
+                        return Box::pin(self.forward_inner(
+                            app_type, method, provider, endpoint, body, headers, extensions,
+                            adapter, true,
+                        ))
+                        .await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if joycode_wire_api == Some(super::providers::joycode::JoycodeWireApi::Responses) {
+                response = super::providers::joycode::normalize_responses_response(
+                    response,
+                    request_is_streaming,
+                    joycode_response_session_context.clone(),
+                )
+                .await?;
+            } else if joycode_wire_api == Some(super::providers::joycode::JoycodeWireApi::Anthropic)
+            {
+                response = super::providers::joycode::normalize_anthropic_response(
+                    response,
+                    request_is_streaming,
+                )
+                .await?;
+            }
             // Streaming requests normally return SSE. If a compatible gateway
             // explicitly returns JSON instead, buffer and validate it inside the retry
             // loop as well so a 2xx Anthropic error envelope can still fail over. Do
@@ -2382,10 +2689,12 @@ impl RequestForwarder {
                 response = self
                     .validate_codex_anthropic_success_response(response)
                     .await?;
-            } else if matches!(
-                resolved_claude_api_format.as_deref(),
-                Some("openai_responses")
-            ) {
+            } else if joycode_wire_api == Some(super::providers::joycode::JoycodeWireApi::Responses)
+                || matches!(
+                    resolved_claude_api_format.as_deref(),
+                    Some("openai_responses")
+                )
+            {
                 if !request_is_streaming || response.is_json() {
                     // Claude→Responses gateways can also return a semantic failure in an
                     // HTTP 2xx Response object. Validate buffered/JSON bodies inside the
@@ -2398,7 +2707,16 @@ impl RequestForwarder {
                     response = self.validate_responses_stream_start(response).await?;
                 }
             }
-            Ok((response, resolved_claude_api_format, outbound_model))
+            let resolved_wire_format = joycode_model
+                .as_ref()
+                .map(|model| match model.wire_api {
+                    super::providers::joycode::JoycodeWireApi::Responses => "openai_responses",
+                    super::providers::joycode::JoycodeWireApi::Anthropic => "anthropic",
+                    super::providers::joycode::JoycodeWireApi::Chat => "openai_chat",
+                })
+                .map(str::to_string)
+                .or(resolved_claude_api_format);
+            Ok((response, resolved_wire_format, outbound_model))
         } else {
             let status_code = status.as_u16();
             // 错误响应同样可能被上游压缩（content-encoding）。reqwest 未启用任何
@@ -2418,6 +2736,68 @@ impl RequestForwarder {
                 None => raw.to_vec(),
             };
             let body_text = String::from_utf8(decoded).ok();
+
+            if is_joycode
+                && !joycode_runtime_retried
+                && super::providers::joycode::is_runtime_token_error_text(body_text.as_deref())
+            {
+                if let Some(lease) = joycode_runtime_lease.as_ref() {
+                    super::providers::joycode::invalidate_runtime_token(lease).await;
+                }
+                log::info!("[JoyCode] runtime token rejected by upstream; requeueing once");
+                return Box::pin(self.forward_inner(
+                    app_type, method, provider, endpoint, body, headers, extensions, adapter, true,
+                ))
+                .await;
+            }
+
+            // A stored Responses chain can expire independently of our local
+            // six-hour cache. Retry once with the original full history after
+            // clearing the chain; the recursive call cannot re-inject it.
+            if joycode_response_chain_injected && status_code == 400 {
+                if let Some(context) = joycode_response_session_context.as_ref() {
+                    super::providers::joycode::clear_responses_session(context);
+                }
+                log::info!(
+                    "[JoyCode] stored response chain rejected; retrying once with full history"
+                );
+                return Box::pin(self.forward_inner(
+                    app_type,
+                    method,
+                    provider,
+                    endpoint,
+                    body,
+                    headers,
+                    extensions,
+                    adapter,
+                    joycode_runtime_retried,
+                ))
+                .await;
+            }
+
+            // Some Chat-compatible models reject the optional OpenAI cache key.
+            // Remember that capability per provider/model and retry once without
+            // the field instead of paying a failed-request penalty every turn.
+            if joycode_chat_cache_key_injected && status_code == 400 {
+                if let Some(route) = joycode_model.as_ref() {
+                    super::providers::joycode::mark_chat_prompt_cache_key_unsupported(
+                        provider, &route.id,
+                    );
+                }
+                log::info!("[JoyCode] prompt_cache_key is unsupported; retrying once without it");
+                return Box::pin(self.forward_inner(
+                    app_type,
+                    method,
+                    provider,
+                    endpoint,
+                    body,
+                    headers,
+                    extensions,
+                    adapter,
+                    joycode_runtime_retried,
+                ))
+                .await;
+            }
 
             Err(ProxyError::UpstreamError {
                 status: status_code,
@@ -2598,6 +2978,52 @@ impl RequestForwarder {
                 return Ok(ProxyResponse::streamed(status, headers, replay));
             }
         }
+    }
+
+    async fn validate_joycode_runtime_stream_start(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        const MAX_RUNTIME_ERROR_PRIME_BYTES: usize = 64 * 1024;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mut stream = Box::pin(response.bytes_stream());
+        let mut replay_chunks: Vec<Bytes> = Vec::new();
+        let mut buffered = Vec::new();
+
+        loop {
+            let Some(chunk) = stream.next().await else {
+                break;
+            };
+            let chunk = chunk.map_err(|error| {
+                ProxyError::ForwardFailed(format!(
+                    "Failed to inspect JoyCode stream start: {error}"
+                ))
+            })?;
+            if buffered.len() < MAX_RUNTIME_ERROR_PRIME_BYTES {
+                let remaining = MAX_RUNTIME_ERROR_PRIME_BYTES - buffered.len();
+                buffered.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            replay_chunks.push(chunk);
+
+            let text = String::from_utf8_lossy(&buffered);
+            if super::providers::joycode::is_runtime_token_error_text(Some(&text)) {
+                return Err(ProxyError::UpstreamError {
+                    status: 409,
+                    body: Some("JoyCode model runtime token was rejected".to_string()),
+                });
+            }
+            if text.contains("\n\n")
+                || text.contains("\r\n\r\n")
+                || buffered.len() >= MAX_RUNTIME_ERROR_PRIME_BYTES
+            {
+                break;
+            }
+        }
+
+        let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+        Ok(ProxyResponse::streamed(status, headers, replay))
     }
 
     async fn prime_streaming_response(
@@ -3405,12 +3831,31 @@ fn headers_contain_proxy_placeholder(headers: &http::HeaderMap) -> bool {
     })
 }
 
+fn proxy_error_is_joycode_runtime_token_error(error: &ProxyError) -> bool {
+    match error {
+        ProxyError::UpstreamError { body, .. } => {
+            super::providers::joycode::is_runtime_token_error_text(body.as_deref())
+                || body
+                    .as_deref()
+                    .is_some_and(|body| body == "JoyCode model runtime token was rejected")
+        }
+        _ => false,
+    }
+}
+
 fn should_preserve_exact_header_case(
     adapter_name: &str,
     provider: &Provider,
     resolved_claude_api_format: Option<&str>,
     is_copilot: bool,
 ) -> bool {
+    // The raw hyper path does not follow redirects. JoyCode carries ptKey and
+    // X-Model-Token custom headers, which reqwest's standard redirect policy
+    // does not classify as sensitive headers for cross-host stripping.
+    if provider.is_joycode() {
+        return true;
+    }
+
     if matches!(adapter_name, "Codex" | "Gemini") {
         return false;
     }

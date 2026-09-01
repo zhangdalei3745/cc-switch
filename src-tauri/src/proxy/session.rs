@@ -8,6 +8,7 @@
 //! - Claude: 从 `metadata.user_id` (格式: `user_xxx_session_yyy`) 或 `metadata.session_id` 提取
 //! - Codex: 从 headers 中的 `session_id` / `x-session-id` 或 `metadata.session_id` 提取
 //! - Grok Build: 从 headers 中的 `x-grok-conv-id` / `x-grok-session-id` 提取
+//! - OpenCode/OpenClaw/Hermes/Pi: 从 `session_id` / `x-session-id` 提取并按应用隔离
 //! - 其他: 生成新的 UUID
 
 use axum::http::HeaderMap;
@@ -73,7 +74,7 @@ pub fn extract_session_id(
     body: &serde_json::Value,
     client_format: &str,
 ) -> SessionIdResult {
-    if client_format == "claude" {
+    if matches!(client_format, "claude" | "claude-desktop") {
         if let Some(result) = extract_claude_session(headers, body) {
             return result;
         }
@@ -81,11 +82,13 @@ pub fn extract_session_id(
 
     // Responses 请求特殊处理。Grok Build 使用与 Codex 相同的客户端协议，
     // 但保留独立前缀，避免统计和缓存键跨应用碰撞。
-    if matches!(client_format, "codex" | "openai" | "grokbuild") {
-        let prefix = if client_format == "grokbuild" {
-            "grokbuild"
-        } else {
-            "codex"
+    if matches!(
+        client_format,
+        "codex" | "openai" | "grokbuild" | "opencode" | "openclaw" | "hermes" | "pi"
+    ) {
+        let prefix = match client_format {
+            "openai" => "codex",
+            other => other,
         };
         if let Some(result) = extract_responses_session(headers, body, prefix) {
             return result;
@@ -345,6 +348,24 @@ mod tests {
                 "codex_d937243f-2702-4f20-97b6-c9682235ab81"
             );
             assert_eq!(result.source, SessionIdSource::Header);
+            assert!(result.client_provided);
+        }
+    }
+
+    #[test]
+    fn test_other_response_clients_keep_namespaced_session_headers() {
+        let body = json!({ "input": "Continue" });
+        for client in ["opencode", "openclaw", "hermes", "pi"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-session-id",
+                "d937243f-2702-4f20-97b6-c9682235ab81".parse().unwrap(),
+            );
+            let result = extract_session_id(&headers, &body, client);
+            assert_eq!(
+                result.session_id,
+                format!("{client}_d937243f-2702-4f20-97b6-c9682235ab81")
+            );
             assert!(result.client_provided);
         }
     }

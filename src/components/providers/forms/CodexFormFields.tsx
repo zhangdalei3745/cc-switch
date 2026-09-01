@@ -71,6 +71,8 @@ interface EndpointCandidate {
 interface CodexFormFieldsProps {
   appId?: AppId;
   providerId?: string;
+  /** JoyCode selects the wire protocol per model from its signed catalog. */
+  isJoycodeProvider?: boolean;
   // xAI OAuth 托管预设（Grok 订阅）：隐藏 API Key / 端点输入，挂账号选择区块
   isXaiOauthPreset?: boolean;
   isXaiOauthAuthenticated?: boolean;
@@ -367,6 +369,7 @@ function ReasoningLevelsEditor({
 export function CodexFormFields({
   appId = "codex",
   providerId,
+  isJoycodeProvider = false,
   isXaiOauthPreset,
   isXaiOauthAuthenticated,
   selectedXaiAccountId,
@@ -689,21 +692,23 @@ export function CodexFormFields({
 
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={handleFetchModels}
-        disabled={isFetchingModels}
-        className="h-7 gap-1"
-      >
-        {isFetchingModels ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Download className="h-3.5 w-3.5" />
-        )}
-        {t("providerForm.fetchModels")}
-      </Button>
+      {!isJoycodeProvider && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={handleFetchModels}
+          disabled={isFetchingModels}
+          className="h-7 gap-1"
+        >
+          {isFetchingModels ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Download className="h-3.5 w-3.5" />
+          )}
+          {t("providerForm.fetchModels")}
+        </Button>
+      )}
       <Button
         type="button"
         variant="outline"
@@ -753,7 +758,7 @@ export function CodexFormFields({
       )}
 
       {/* Codex API Key 输入框（托管 OAuth 预设无需 Key） */}
-      {!isCodexOauthPreset && !isXaiOauthPreset && (
+      {!isCodexOauthPreset && !isXaiOauthPreset && !isJoycodeProvider && (
         <ApiKeySection
           id="codexApiKey"
           label="API Key"
@@ -776,7 +781,7 @@ export function CodexFormFields({
       )}
 
       {/* Codex Base URL 输入框（托管 OAuth 端点由 adapter 硬定向，不展示） */}
-      {shouldShowSpeedTest && !isXaiOauthPreset && (
+      {shouldShowSpeedTest && !isXaiOauthPreset && !isJoycodeProvider && (
         <EndpointField
           id="codexBaseUrl"
           label={t("codexConfig.apiUrlLabel")}
@@ -814,21 +819,23 @@ export function CodexFormFields({
               }
               className="flex-1"
             />
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              onClick={handleFetchModels}
-              disabled={isFetchingModels}
-              className="shrink-0"
-              title={t("providerForm.fetchModels")}
-            >
-              {isFetchingModels ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Download className="h-4 w-4" />
-              )}
-            </Button>
+            {!isJoycodeProvider && (
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={handleFetchModels}
+                disabled={isFetchingModels}
+                className="shrink-0"
+                title={t("providerForm.fetchModels")}
+              >
+                {isFetchingModels ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+              </Button>
+            )}
             {defaultModelSuggestions.length > 0 && (
               <ModelDropdown
                 models={defaultModelSuggestions}
@@ -910,7 +917,7 @@ export function CodexFormFields({
             {/* 上游格式 —— Chat 需开启路由接管（走代理转换），Responses 原生直连。
                 沿用 shouldShowSpeedTest 门控，cloud_provider 保持不可切换；
                 xAI OAuth 托管预设格式钉死 Responses，不可切换。 */}
-            {shouldShowSpeedTest && !isXaiOauthPreset && (
+            {shouldShowSpeedTest && !isXaiOauthPreset && !isJoycodeProvider && (
               <div className="space-y-3">
                 <div className="space-y-1.5">
                   <FormLabel htmlFor="codex-upstream-format">
@@ -1204,10 +1211,15 @@ export function CodexFormFields({
                     )}
                   </div>
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    {t("codexConfig.modelMappingHint", {
-                      defaultValue:
-                        "选择模型角色后，CC Switch 会自动生成 Codex 兼容路由；菜单显示名可以填 DeepSeek、Kimi 等品牌模型，实际请求模型按右侧填写内容发送。",
-                    })}
+                    {isJoycodeProvider
+                      ? t("joycode.codexModelMappingHint", {
+                          defaultValue:
+                            "这里的模型会出现在 Codex /model 菜单中。选择后，CC Switch 会按 JoyCode 当前模型目录自动适配 Responses、Anthropic Messages 或 Chat Completions 协议。",
+                        })
+                      : t("codexConfig.modelMappingHint", {
+                          defaultValue:
+                            "选择模型角色后，CC Switch 会自动生成 Codex 兼容路由；菜单显示名可以填 DeepSeek、Kimi 等品牌模型，实际请求模型按右侧填写内容发送。",
+                        })}
                   </p>
                 </div>
 

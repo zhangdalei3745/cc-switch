@@ -50,6 +50,7 @@ import {
   fetchModelsForConfig,
   showFetchModelsError,
   type FetchedModel,
+  type JoycodeFetchedModel,
 } from "@/lib/api/model-fetch";
 import {
   providersApi,
@@ -59,6 +60,11 @@ import { resolveManagedAccountId } from "@/lib/authBinding";
 import type { ManagedAuthProvider } from "@/lib/api";
 import { useCopilotAuth, useCodexOauth, useXaiOauth } from "./hooks";
 import { isOAuthProviderType } from "@/config/constants";
+import {
+  JoycodeConnectionFields,
+  type JoycodeCredentialMetadata,
+  type JoycodeNetwork,
+} from "./JoycodeConnectionFields";
 
 export type ClaudeDesktopProviderFormValues = ProviderFormData & {
   presetId?: string;
@@ -207,6 +213,47 @@ function normalizeProxyRows(rows: RouteRow[]): RouteRow[] {
   });
 }
 
+function latestJoycodeModel(
+  models: JoycodeFetchedModel[],
+  family: "sonnet" | "opus" | "haiku",
+) {
+  return models
+    .filter((model) => model.id.toLowerCase().includes(family))
+    .sort((left, right) =>
+      right.id.localeCompare(left.id, undefined, { numeric: true }),
+    )[0];
+}
+
+/**
+ * 将 JoyCode 的动态模型目录投影到 Claude Desktop 固定的四档角色。
+ * Fable 当前没有稳定的 JoyCode 同名模型，沿用 Sonnet；缺少 Haiku/Opus 时
+ * 同样回退 Sonnet，确保 Claude Desktop 的后台子任务始终能解析到可用模型。
+ */
+function joycodeCatalogToProxyRows(models: JoycodeFetchedModel[]): RouteRow[] {
+  if (models.length === 0) return [];
+
+  const sonnet = latestJoycodeModel(models, "sonnet");
+  const opus = latestJoycodeModel(models, "opus");
+  const haiku = latestJoycodeModel(models, "haiku");
+  const fallback = sonnet ?? opus ?? models[0];
+  const selected = {
+    sonnet: sonnet ?? fallback,
+    opus: opus ?? sonnet ?? fallback,
+    fable: sonnet ?? opus ?? fallback,
+    haiku: haiku ?? sonnet ?? fallback,
+  } satisfies Record<RouteRole, JoycodeFetchedModel>;
+
+  return ROLE_ORDER.map((role) => {
+    const model = selected[role];
+    return createRouteRow({
+      route: ROLE_ROUTE_IDS[role],
+      model: model.id,
+      labelOverride: model.id,
+      supports1m: (model.contextWindow ?? 0) >= 1_000_000,
+    });
+  });
+}
+
 function isClaudeSafeRoute(route: string) {
   const normalized = route.trim().toLowerCase();
   if (normalized.includes(LEGACY_ONE_M_MARKER)) return false;
@@ -263,6 +310,15 @@ export function ClaudeDesktopProviderForm({
     envString(initialData?.settingsConfig, "ANTHROPIC_AUTH_TOKEN") ||
       envString(initialData?.settingsConfig, "ANTHROPIC_API_KEY"),
   );
+  const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
+    initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
+  );
+  const [joycodeCredentialMetadata, setJoycodeCredentialMetadata] =
+    useState<JoycodeCredentialMetadata>(() => ({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    }));
   const [apiKeyField, setApiKeyField] = useState<ApiKeyField>(() =>
     envString(initialData?.settingsConfig, "ANTHROPIC_API_KEY")
       ? "ANTHROPIC_API_KEY"
@@ -375,6 +431,7 @@ export function ClaudeDesktopProviderForm({
   );
   const activeProviderType =
     activePreset?.providerType ?? initialData?.meta?.providerType;
+  const isJoycodeProvider = activeProviderType === "joycode";
   const { isAuthenticated: isCopilotAuthenticated, accounts: copilotAccounts } =
     useCopilotAuth();
   const {
@@ -413,6 +470,7 @@ export function ClaudeDesktopProviderForm({
   });
 
   const applyDesktopPreset = (preset: ClaudeDesktopProviderPreset) => {
+    setFetchedModels([]);
     form.setValue("name", preset.nameKey ? t(preset.nameKey) : preset.name);
     form.setValue("websiteUrl", preset.websiteUrl);
     form.setValue("notes", "");
@@ -562,6 +620,26 @@ export function ClaudeDesktopProviderForm({
       });
     } finally {
       setIsFetchingModels(false);
+    }
+  };
+
+  const handleJoycodeModelsLoaded = (models: JoycodeFetchedModel[]) => {
+    setFetchedModels(
+      models.map((model) => ({
+        id: model.id,
+        ownedBy:
+          model.wireApi === "responses"
+            ? "JoyCode · Responses"
+            : model.wireApi === "anthropic"
+              ? "JoyCode · Anthropic"
+              : "JoyCode · Chat",
+      })),
+    );
+
+    const syncedRoutes = joycodeCatalogToProxyRows(models);
+    if (syncedRoutes.length > 0) {
+      didSeedDefaultProxyRoutes.current = true;
+      setProxyRoutes(syncedRoutes);
     }
   };
 
@@ -784,6 +862,16 @@ export function ClaudeDesktopProviderForm({
 
     meta.claudeDesktopModelRoutes = routeMap;
     meta.providerType = activeProviderType;
+    meta.joycodeNetwork = isJoycodeProvider ? joycodeNetwork : undefined;
+    meta.joycodeExternalBaseUrl = isJoycodeProvider
+      ? joycodeCredentialMetadata.externalBaseUrl
+      : undefined;
+    meta.joycodeLoginType = isJoycodeProvider
+      ? joycodeCredentialMetadata.loginType
+      : undefined;
+    meta.joycodeTenant = isJoycodeProvider
+      ? joycodeCredentialMetadata.tenant
+      : undefined;
     meta.authBinding =
       activeProviderType === "github_copilot"
         ? {
@@ -826,7 +914,7 @@ export function ClaudeDesktopProviderForm({
 
   const renderActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
-      {!usesManagedOAuth && (
+      {!usesManagedOAuth && !isJoycodeProvider && (
         <Button
           type="button"
           variant="outline"
@@ -870,6 +958,20 @@ export function ClaudeDesktopProviderForm({
             presetCategoryLabels={presetCategoryLabels}
             onPresetChange={handlePresetChange}
             category={activePreset?.category}
+          />
+        )}
+
+        {isJoycodeProvider && (
+          <JoycodeConnectionFields
+            network={joycodeNetwork}
+            onNetworkChange={setJoycodeNetwork}
+            credential={apiKey}
+            credentialMetadata={joycodeCredentialMetadata}
+            onCredential={(ptKey, metadata) => {
+              if (metadata) setJoycodeCredentialMetadata(metadata);
+              setApiKey(ptKey);
+            }}
+            onModelsLoaded={handleJoycodeModelsLoaded}
           />
         )}
 
@@ -919,7 +1021,7 @@ export function ClaudeDesktopProviderForm({
                   />
                 )}
               </div>
-            ) : (
+            ) : !isJoycodeProvider ? (
               <ApiKeySection
                 value={apiKey}
                 onChange={setApiKey}
@@ -929,25 +1031,27 @@ export function ClaudeDesktopProviderForm({
                 isPartner={apiKeyLinkIsPartner}
                 partnerPromotionKey={apiKeyLinkPromotionKey}
               />
-            )}
+            ) : null}
 
-            <EndpointField
-              id="baseUrl"
-              label={t("providerForm.apiEndpoint")}
-              value={baseUrl}
-              onChange={(v) => setBaseUrl(v)}
-              placeholder={t("providerForm.apiEndpointPlaceholder")}
-              hint={
-                needsModelMapping && apiFormat === "openai_responses"
-                  ? t("providerForm.apiHintResponses")
-                  : needsModelMapping && apiFormat === "openai_chat"
-                    ? t("providerForm.apiHintOAI")
-                    : needsModelMapping && apiFormat === "gemini_native"
-                      ? t("providerForm.apiHintGeminiNative")
-                      : t("providerForm.apiHint")
-              }
-              showManageButton={false}
-            />
+            {!isJoycodeProvider && (
+              <EndpointField
+                id="baseUrl"
+                label={t("providerForm.apiEndpoint")}
+                value={baseUrl}
+                onChange={(v) => setBaseUrl(v)}
+                placeholder={t("providerForm.apiEndpointPlaceholder")}
+                hint={
+                  needsModelMapping && apiFormat === "openai_responses"
+                    ? t("providerForm.apiHintResponses")
+                    : needsModelMapping && apiFormat === "openai_chat"
+                      ? t("providerForm.apiHintOAI")
+                      : needsModelMapping && apiFormat === "gemini_native"
+                        ? t("providerForm.apiHintGeminiNative")
+                        : t("providerForm.apiHint")
+                }
+                showManageButton={false}
+              />
+            )}
 
             <div className="space-y-4 border-l border-border-default pl-3">
               <div className="flex items-stretch justify-between gap-4">
@@ -1012,7 +1116,7 @@ export function ClaudeDesktopProviderForm({
 
               {needsModelMapping && (
                 <div className="space-y-4 border-t border-border-default pt-4">
-                  {activeProviderType !== "xai_oauth" && (
+                  {activeProviderType !== "xai_oauth" && !isJoycodeProvider && (
                     <div className="space-y-2">
                       <Label>
                         {t("providerForm.apiFormat", {
@@ -1064,7 +1168,7 @@ export function ClaudeDesktopProviderForm({
                             defaultValue: "模型映射",
                           })}
                         </Label>
-                        {!usesManagedOAuth && (
+                        {!usesManagedOAuth && !isJoycodeProvider && (
                           <Button
                             type="button"
                             variant="outline"

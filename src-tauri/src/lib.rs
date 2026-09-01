@@ -1239,6 +1239,18 @@ pub fn run() {
 
                 initialize_common_config_snippets(&state);
 
+                match crate::services::provider::ProviderService::migrate_joycode_model_catalogs(
+                    &state,
+                )
+                .await
+                {
+                    Ok(count) if count > 0 => {
+                        log::info!("✓ Migrated JoyCode model mappings for {count} provider(s)")
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("✗ Failed to migrate JoyCode model mappings: {error}"),
+                }
+
                 // 检查 settings 表中的代理状态，自动恢复代理服务
                 restore_proxy_state_on_startup(&state).await;
 
@@ -1480,6 +1492,10 @@ pub fn run() {
             commands::apply_profile,
             // model list fetch (OpenAI-compatible /v1/models)
             commands::fetch_models_for_config,
+            commands::fetch_joycode_models,
+            commands::discover_joycode_pt_key,
+            commands::validate_joycode_credential,
+            commands::import_joycode_credential,
             commands::get_opencode_models,
             // ours: endpoint speed test + custom endpoint management
             commands::test_api_endpoints,

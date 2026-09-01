@@ -89,6 +89,13 @@ fn responses_json_to_anthropic_sse(
         }
     };
 
+    anthropic_message_to_sse_events(&message)
+}
+
+/// Convert a complete Anthropic Message JSON document into the SSE lifecycle
+/// expected by streaming Anthropic clients. Some compatible gateways ignore
+/// `stream:true` and return this document with `application/json`.
+pub(crate) fn anthropic_message_to_sse_events(message: &Value) -> Vec<Bytes> {
     let usage = message.get("usage").cloned().unwrap_or_else(|| json!({}));
     let mut start_usage = usage.clone();
     start_usage["output_tokens"] = json!(0);
@@ -4572,6 +4579,45 @@ mod tests {
     use futures::stream;
     use futures::StreamExt;
     use std::collections::HashMap;
+
+    #[test]
+    fn converts_complete_anthropic_message_to_sse_lifecycle() {
+        let message = json!({
+            "id": "msg_joycode",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-6",
+            "content": [{"type": "text", "text": "OK"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0
+            }
+        });
+
+        let output = anthropic_message_to_sse_events(&message)
+            .into_iter()
+            .map(|chunk| String::from_utf8(chunk.to_vec()).unwrap())
+            .collect::<String>();
+
+        for event_name in [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ] {
+            assert!(
+                output.contains(&format!("event: {event_name}")),
+                "missing {event_name} in {output}"
+            );
+        }
+        assert!(output.contains("\"text\":\"OK\""));
+    }
 
     async fn convert_stream_text(input: impl Into<Bytes>) -> String {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(input.into())]);

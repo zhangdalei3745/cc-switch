@@ -234,6 +234,11 @@ export interface ProviderMeta {
   liveConfigManaged?: boolean;
   // 供应商类型（用于识别 Copilot 等特殊供应商）
   providerType?: string;
+  // JoyCode fixed network selector. External base is supplied only by trusted config.
+  joycodeNetwork?: "internal" | "external";
+  joycodeExternalBaseUrl?: string;
+  joycodeLoginType?: string;
+  joycodeTenant?: string;
   // GitHub Copilot 关联账号 ID（旧字段，保留兼容读取）
   githubAccountId?: string;
 }

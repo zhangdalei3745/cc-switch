@@ -30,6 +30,7 @@ export interface GeminiProviderPreset {
   // 图标配置
   icon?: string; // 图标名称
   iconColor?: string; // 图标颜色
+  providerType?: "joycode";
 }
 
 export const geminiProviderPresets: GeminiProviderPreset[] = [
@@ -50,6 +51,25 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     },
     icon: "gemini",
     iconColor: "#4285F4",
+  },
+  {
+    name: "JD Joycode",
+    websiteUrl: "http://joycode.jd.com",
+    apiKeyUrl: "http://joycode.jd.com",
+    providerType: "joycode",
+    settingsConfig: {
+      env: {
+        GOOGLE_GEMINI_BASE_URL: "http://127.0.0.1:15721/gemini",
+        GEMINI_API_KEY: "",
+        GEMINI_MODEL: "joycode",
+      },
+    },
+    baseURL: "http://127.0.0.1:15721/gemini",
+    model: "joycode",
+    description: "JD Joycode",
+    category: "cn_official",
+    icon: "joycode",
+    iconColor: "#E1251B",
   },
   // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
   {

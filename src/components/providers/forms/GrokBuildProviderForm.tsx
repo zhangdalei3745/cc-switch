@@ -52,6 +52,11 @@ import {
 } from "@/utils/grokBuildConfig";
 import { resolveProviderIcon } from "@/utils/providerIcon";
 import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
+import {
+  JoycodeConnectionFields,
+  type JoycodeCredentialMetadata,
+  type JoycodeNetwork,
+} from "./JoycodeConnectionFields";
 
 type GrokBuildProviderFormProps = Omit<ProviderFormProps, "appId">;
 
@@ -156,6 +161,21 @@ export function GrokBuildProviderForm({
   const [draftCustomEndpoints, setDraftCustomEndpoints] = useState<string[]>(
     [],
   );
+  const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
+    initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
+  );
+  const [joycodeCredentialMetadata, setJoycodeCredentialMetadata] =
+    useState<JoycodeCredentialMetadata>(() => ({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    }));
+  const selectedPreset = grokPresetEntries.find(
+    (entry) => entry.id === selectedPresetId,
+  )?.preset;
+  const isJoycodeProvider =
+    initialData?.meta?.providerType === "joycode" ||
+    selectedPreset?.providerType === "joycode";
 
   const form = useForm<ProviderFormData>({
     resolver: zodResolver(providerSchema),
@@ -384,6 +404,17 @@ export function GrokBuildProviderForm({
     delete initialMeta.custom_endpoints;
     const meta: ProviderMeta = {
       ...initialMeta,
+      providerType: isJoycodeProvider ? "joycode" : undefined,
+      joycodeNetwork: isJoycodeProvider ? joycodeNetwork : undefined,
+      joycodeExternalBaseUrl: isJoycodeProvider
+        ? joycodeCredentialMetadata.externalBaseUrl
+        : undefined,
+      joycodeLoginType: isJoycodeProvider
+        ? joycodeCredentialMetadata.loginType
+        : undefined,
+      joycodeTenant: isJoycodeProvider
+        ? joycodeCredentialMetadata.tenant
+        : undefined,
       apiFormat,
       apiKeyField: anthropicAuthField,
       isFullUrl,
@@ -437,9 +468,23 @@ export function GrokBuildProviderForm({
           />
         )}
 
+        {isJoycodeProvider && (
+          <JoycodeConnectionFields
+            network={joycodeNetwork}
+            onNetworkChange={setJoycodeNetwork}
+            credential={apiKey}
+            credentialMetadata={joycodeCredentialMetadata}
+            onCredential={(ptKey, metadata) => {
+              if (metadata) setJoycodeCredentialMetadata(metadata);
+              setApiKey(ptKey);
+              syncStructuredConfig({ apiKey: ptKey });
+            }}
+          />
+        )}
+
         <BasicFormFields form={form} />
 
-        {category !== "official" && (
+        {category !== "official" && !isJoycodeProvider && (
           <>
             <CodexFormFields
               appId="grokbuild"

@@ -61,6 +61,19 @@ pub fn is_openai_o_series(model: &str) -> bool {
         && model.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
 }
 
+/// Detect Claude models (claude-3, claude-sonnet, claude-opus, etc.)
+/// These models require `max_completion_tokens` instead of `max_tokens`
+/// when accessed through OpenAI-compatible endpoints (e.g., Joycode gateway).
+pub fn is_claude_model(model: &str) -> bool {
+    let normalized = model.to_lowercase();
+    normalized.starts_with("claude-")
+        || normalized.starts_with("claude3-")
+        || (normalized.starts_with("claude")
+            && (normalized.contains("-sonnet")
+                || normalized.contains("-opus")
+                || normalized.contains("-haiku")))
+}
+
 /// Detect Responses-compatible models that support reasoning effort.
 ///
 /// Supported families:
@@ -1983,5 +1996,27 @@ mod tests {
             run_tool_choice(json!({"type": "tool", "name": "search"})),
             json!({"type": "function", "function": {"name": "search"}}),
         );
+    }
+
+    #[test]
+    fn is_claude_model_detects_claude_prefix() {
+        assert!(is_claude_model("claude-3-opus"));
+        assert!(is_claude_model("claude-3-sonnet"));
+        assert!(is_claude_model("claude-3-haiku"));
+        assert!(is_claude_model("claude-sonnet-4-20250514"));
+        assert!(is_claude_model("claude-opus-4-20250514"));
+        assert!(is_claude_model("claude-haiku-3-5-20241022"));
+        assert!(is_claude_model("Claude-Sonnet-4")); // 大小写不敏感
+        assert!(is_claude_model("CLAUDE-3-OPUS")); // 全大写
+    }
+
+    #[test]
+    fn is_claude_model_rejects_non_claude() {
+        assert!(!is_claude_model("gpt-4o"));
+        assert!(!is_claude_model("gpt-5.6-sol"));
+        assert!(!is_claude_model("o3-mini"));
+        assert!(!is_claude_model("deepseek-v3"));
+        assert!(!is_claude_model("gemini-2.5-pro"));
+        assert!(!is_claude_model("claude")); // 没有后缀
     }
 }

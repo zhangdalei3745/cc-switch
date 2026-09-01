@@ -18,6 +18,17 @@ export interface PiModelCatalogEntry {
  * Reviewed model values used only to build Pi provider presets.
  */
 export const piModelCatalog = {
+  // JoyCode replaces this placeholder from its signed account model catalog
+  // after login. Conservative limits avoid overstating an unknown model.
+  "joycode/dynamic": {
+    capabilities: {
+      name: "JoyCode（登录后获取模型）",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 131_072,
+      maxTokens: 32_768,
+    },
+  },
   "amazon/nova-pro": {
     capabilities: {
       name: "Amazon Nova Pro",

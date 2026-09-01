@@ -2046,6 +2046,12 @@ requires_openai_auth = true
         db.save_live_backup("claude-desktop", "{}")
             .await
             .expect("seed live backup");
+        db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        })
+        .await
+        .expect("use ephemeral proxy port");
         {
             let mut config = db
                 .get_proxy_config_for_app("claude-desktop")
@@ -2057,7 +2063,7 @@ requires_openai_auth = true
                 .expect("update app proxy config");
         }
 
-        state
+        let proxy_info = state
             .proxy_service
             .start()
             .await
@@ -2105,7 +2111,10 @@ requires_openai_auth = true
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!(
+                "http://127.0.0.1:{}/claude-desktop",
+                proxy_info.port
+            )),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
@@ -2114,6 +2123,12 @@ requires_openai_auth = true
             json!([{ "name": "claude-sonnet-4-6", "labelOverride": "DeepSeek V4 Flash Updated", "supports1m": true }]),
             "provider edits should propagate into the Claude Desktop 3P profile during takeover"
         );
+
+        state
+            .proxy_service
+            .stop()
+            .await
+            .expect("stop proxy service");
     }
 
     #[test]
@@ -4113,6 +4128,197 @@ wire_api = "responses"
 }
 
 impl ProviderService {
+    /// Backfill the placeholder-only JoyCode presets shipped before v3.19.8.
+    ///
+    /// This runs before proxy takeover restoration. It only replaces missing
+    /// or `joycode`/`custom` placeholders, so explicit user mappings remain
+    /// untouched. Catalog discovery is also skipped once a provider is fixed.
+    pub async fn migrate_joycode_model_catalogs(state: &AppState) -> Result<usize, AppError> {
+        fn is_placeholder(value: Option<&str>) -> bool {
+            value
+                .map(str::trim)
+                .is_none_or(|value| value.is_empty() || matches!(value, "joycode" | "custom"))
+        }
+
+        fn claude_needs_migration(provider: &Provider) -> bool {
+            let env = provider
+                .settings_config
+                .get("env")
+                .and_then(Value::as_object);
+            [
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            ]
+            .into_iter()
+            .any(|key| is_placeholder(env.and_then(|value| value.get(key)).and_then(Value::as_str)))
+        }
+
+        fn codex_needs_migration(provider: &Provider) -> bool {
+            let catalog_empty = provider
+                .settings_config
+                .pointer("/modelCatalog/models")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty);
+            let model = provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .and_then(|config| config.parse::<toml::Value>().ok())
+                .and_then(|config| {
+                    config
+                        .get("model")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                });
+            catalog_empty || is_placeholder(model.as_deref())
+        }
+
+        fn set_claude_mapping(
+            provider: &mut Provider,
+            models: &[crate::proxy::providers::joycode::JoycodeModel],
+        ) -> bool {
+            let Some((haiku, sonnet, opus)) =
+                crate::proxy::providers::joycode::claude_role_models(models)
+            else {
+                return false;
+            };
+            let Some(env) = provider
+                .settings_config
+                .get_mut("env")
+                .and_then(Value::as_object_mut)
+            else {
+                return false;
+            };
+            let mut changed = false;
+            for (key, name_key, model) in [
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+                    &haiku,
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+                    &sonnet,
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+                    &opus,
+                ),
+            ] {
+                if is_placeholder(env.get(key).and_then(Value::as_str)) {
+                    env.insert(key.to_string(), Value::String(model.id.clone()));
+                    env.insert(name_key.to_string(), Value::String(model.id.clone()));
+                    changed = true;
+                }
+            }
+            if is_placeholder(env.get("ANTHROPIC_MODEL").and_then(Value::as_str)) {
+                env.insert(
+                    "ANTHROPIC_MODEL".to_string(),
+                    Value::String(sonnet.id.clone()),
+                );
+                changed = true;
+            }
+            changed
+        }
+
+        fn set_codex_catalog(
+            provider: &mut Provider,
+            models: &[crate::proxy::providers::joycode::JoycodeModel],
+        ) -> bool {
+            let Some(default_model) = crate::proxy::providers::joycode::codex_default_model(models)
+            else {
+                return false;
+            };
+            let entries: Vec<Value> = models
+                .iter()
+                .map(|model| {
+                    let mut entry = serde_json::json!({
+                        "model": model.id.clone(),
+                        "displayName": model.id.clone(),
+                    });
+                    if let Some(context_window) = model.context_window {
+                        entry["contextWindow"] = serde_json::json!(context_window);
+                    }
+                    entry
+                })
+                .collect();
+            provider.settings_config["modelCatalog"] = serde_json::json!({ "models": entries });
+
+            if let Some(config) = provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                if let Ok(mut document) = config.parse::<toml_edit::DocumentMut>() {
+                    let current = document.get("model").and_then(toml_edit::Item::as_str);
+                    if is_placeholder(current) {
+                        document["model"] = toml_edit::value(default_model.id);
+                        provider.settings_config["config"] = Value::String(document.to_string());
+                    }
+                }
+            }
+            true
+        }
+
+        let mut migrated = 0;
+        for app_type in [AppType::Claude, AppType::Codex] {
+            let providers = state.db.get_all_providers(app_type.as_str())?;
+            for mut provider in providers.into_values() {
+                if !crate::proxy::providers::joycode::is_joycode_provider(&provider) {
+                    continue;
+                }
+                let needs_migration = match app_type {
+                    AppType::Claude => claude_needs_migration(&provider),
+                    AppType::Codex => codex_needs_migration(&provider),
+                    _ => false,
+                };
+                if !needs_migration {
+                    continue;
+                }
+
+                let (_, configured_key) = provider.resolve_usage_credentials(&app_type);
+                let pt_key =
+                    crate::proxy::providers::joycode::resolve_latest_pt_key(&configured_key);
+                if pt_key.is_empty() {
+                    log::warn!(
+                        "JoyCode model mapping migration skipped for {}: missing credential",
+                        provider.id
+                    );
+                    continue;
+                }
+                let models = match crate::proxy::providers::joycode::fetch_models(
+                    &provider, &pt_key,
+                )
+                .await
+                {
+                    Ok(models) => models,
+                    Err(error) => {
+                        log::warn!(
+                            "JoyCode model mapping migration failed for {}: {error}",
+                            provider.id
+                        );
+                        continue;
+                    }
+                };
+                let changed = match app_type {
+                    AppType::Claude => set_claude_mapping(&mut provider, &models),
+                    AppType::Codex => set_codex_catalog(&mut provider, &models),
+                    _ => false,
+                };
+                if changed {
+                    state.db.save_provider(app_type.as_str(), &provider)?;
+                    migrated += 1;
+                }
+            }
+        }
+        Ok(migrated)
+    }
+
     fn managed_codex_oauth_account_id(provider: &Provider) -> Option<String> {
         provider
             .meta

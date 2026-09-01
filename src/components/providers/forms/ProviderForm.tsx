@@ -130,6 +130,12 @@ import { resolveManagedAccountId } from "@/lib/authBinding";
 import { useOpenClawLiveProviderIds } from "@/hooks/useOpenClaw";
 import { useHermesLiveProviderIds } from "@/hooks/useHermes";
 import { resolveCodexOfficialIdentity } from "@/utils/providerCapabilities";
+import {
+  JoycodeConnectionFields,
+  type JoycodeCredentialMetadata,
+  type JoycodeNetwork,
+} from "./JoycodeConnectionFields";
+import type { JoycodeFetchedModel } from "@/lib/api/model-fetch";
 
 type PresetEntry = {
   id: string;
@@ -144,11 +150,12 @@ type PresetEntry = {
 
 function getPresetProviderType(
   preset: PresetEntry["preset"] | null | undefined,
-): "github_copilot" | "codex_oauth" | "xai_oauth" | undefined {
+): "github_copilot" | "codex_oauth" | "xai_oauth" | "joycode" | undefined {
   if (!preset || !("providerType" in preset)) return undefined;
   return preset.providerType === "github_copilot" ||
     preset.providerType === "codex_oauth" ||
-    preset.providerType === "xai_oauth"
+    preset.providerType === "xai_oauth" ||
+    preset.providerType === "joycode"
     ? preset.providerType
     : undefined;
 }
@@ -633,6 +640,29 @@ function ProviderFormFull({
         initialData?.meta?.localProxyRequestOverrides?.body,
       ),
   );
+  const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
+    initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
+  );
+  const [joycodeCredentialMetadata, setJoycodeCredentialMetadata] =
+    useState<JoycodeCredentialMetadata>(() => ({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    }));
+  const [joycodeModels, setJoycodeModels] = useState<JoycodeFetchedModel[]>([]);
+  useEffect(() => {
+    setJoycodeNetwork(
+      initialData?.meta?.joycodeNetwork === "external"
+        ? "external"
+        : "internal",
+    );
+    setJoycodeCredentialMetadata({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    });
+    setJoycodeModels([]);
+  }, [appId, initialData]);
 
   const {
     codexAuth,
@@ -807,6 +837,8 @@ function ProviderFormFull({
   const wasCodexOfficialManagedOauthBound =
     appId === "codex" &&
     Boolean(resolveManagedAccountId(initialData?.meta, "codex_oauth"));
+  const isJoycodeProvider =
+    presetProviderType === "joycode" || initialProviderType === "joycode";
   const isCodexOfficialProvider =
     appId === "codex" &&
     (hasExistingCodexOfficialIdentity ||
@@ -1013,6 +1045,87 @@ function ProviderFormFull({
     onSettingsConfigChange: (config) => form.setValue("settingsConfig", config),
     getSettingsConfig: () => form.getValues("settingsConfig"),
   });
+
+  const handleJoycodeCredential = useCallback(
+    (ptKey: string, metadata?: JoycodeCredentialMetadata) => {
+      setJoycodeModels([]);
+      if (metadata) setJoycodeCredentialMetadata(metadata);
+      if (appId === "codex") handleCodexApiKeyChange(ptKey);
+      else if (appId === "gemini") handleGeminiApiKeyChange(ptKey);
+      else if (appId === "opencode")
+        opencodeForm.handleOpencodeApiKeyChange(ptKey);
+      else if (appId === "openclaw")
+        openclawForm.handleOpenclawApiKeyChange(ptKey);
+      else if (appId === "hermes") hermesForm.handleHermesApiKeyChange(ptKey);
+      else handleApiKeyChange(ptKey);
+    },
+    [
+      appId,
+      handleApiKeyChange,
+      handleCodexApiKeyChange,
+      handleGeminiApiKeyChange,
+      hermesForm,
+      opencodeForm,
+      openclawForm,
+    ],
+  );
+
+  const handleJoycodeModelsLoaded = useCallback(
+    (models: JoycodeFetchedModel[]) => {
+      setJoycodeModels(models);
+      if (models.length === 0) return;
+
+      const latestMatching = (token: string) =>
+        models
+          .filter((model) => model.id.toLowerCase().includes(token))
+          .sort((left, right) =>
+            right.id.localeCompare(left.id, undefined, { numeric: true }),
+          )[0];
+
+      if (appId === "claude") {
+        const sonnet = latestMatching("sonnet");
+        const opus = latestMatching("opus");
+        const haiku = latestMatching("haiku") ?? sonnet;
+        const fallback = sonnet ?? opus ?? models[0];
+        const selectedSonnet = sonnet ?? fallback;
+        const selectedOpus = opus ?? selectedSonnet;
+        const selectedHaiku = haiku ?? selectedSonnet;
+
+        handleModelChange("ANTHROPIC_MODEL", selectedSonnet.id);
+        handleModelChange("ANTHROPIC_DEFAULT_HAIKU_MODEL", selectedHaiku.id);
+        handleModelChange(
+          "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+          selectedHaiku.id,
+        );
+        handleModelChange("ANTHROPIC_DEFAULT_SONNET_MODEL", selectedSonnet.id);
+        handleModelChange(
+          "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+          selectedSonnet.id,
+        );
+        handleModelChange("ANTHROPIC_DEFAULT_OPUS_MODEL", selectedOpus.id);
+        handleModelChange("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", selectedOpus.id);
+        return;
+      }
+
+      if (appId === "codex") {
+        setCodexCatalogModels(
+          models.map((model) => ({
+            model: model.id,
+            displayName: model.id,
+            contextWindow: model.contextWindow,
+          })),
+        );
+        const defaultModel =
+          models
+            .filter((model) => model.wireApi === "responses")
+            .sort((left, right) =>
+              right.id.localeCompare(left.id, undefined, { numeric: true }),
+            )[0] ?? models[0];
+        handleCodexModelChange(defaultModel.id);
+      }
+    },
+    [appId, handleCodexModelChange, handleModelChange, setCodexCatalogModels],
+  );
   const {
     data: hermesLiveProviderIds = [],
     isLoading: isHermesLiveProviderIdsLoading,
@@ -1709,7 +1822,9 @@ function ProviderFormFull({
         ? "codex_oauth"
         : isXaiOauthProvider
           ? "xai_oauth"
-          : undefined;
+          : isJoycodeProvider
+            ? "joycode"
+            : undefined;
 
     const nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),
@@ -1725,6 +1840,16 @@ function ProviderFormFull({
       claudeDesktopMode: undefined,
       // 保存 providerType（用于识别 Copilot / Codex OAuth 等特殊供应商）
       providerType,
+      joycodeNetwork: isJoycodeProvider ? joycodeNetwork : undefined,
+      joycodeExternalBaseUrl: isJoycodeProvider
+        ? joycodeCredentialMetadata.externalBaseUrl
+        : undefined,
+      joycodeLoginType: isJoycodeProvider
+        ? joycodeCredentialMetadata.loginType
+        : undefined,
+      joycodeTenant: isJoycodeProvider
+        ? joycodeCredentialMetadata.tenant
+        : undefined,
       authBinding: isCopilotProvider
         ? {
             source: "managed_account",
@@ -2155,6 +2280,33 @@ function ProviderFormFull({
             />
           )}
 
+          {isJoycodeProvider && (
+            <JoycodeConnectionFields
+              providerId={providerId}
+              network={joycodeNetwork}
+              onNetworkChange={(network) => {
+                setJoycodeNetwork(network);
+                setJoycodeModels([]);
+              }}
+              credential={
+                appId === "codex"
+                  ? codexApiKey
+                  : appId === "gemini"
+                    ? geminiApiKey
+                    : appId === "opencode"
+                      ? opencodeForm.opencodeApiKey
+                      : appId === "openclaw"
+                        ? openclawForm.openclawApiKey
+                        : appId === "hermes"
+                          ? hermesForm.hermesApiKey
+                          : apiKey
+              }
+              credentialMetadata={joycodeCredentialMetadata}
+              onCredential={handleJoycodeCredential}
+              onModelsLoaded={handleJoycodeModelsLoaded}
+            />
+          )}
+
           <BasicFormFields
             form={form}
             beforeNameSlot={
@@ -2361,7 +2513,18 @@ function ProviderFormFull({
           {appId === "claude" && (
             <ClaudeFormFields
               providerId={providerId}
+              isJoycodeProvider={isJoycodeProvider}
+              modelSuggestions={joycodeModels.map((model) => ({
+                id: model.id,
+                ownedBy:
+                  model.wireApi === "responses"
+                    ? "JoyCode · Responses"
+                    : model.wireApi === "anthropic"
+                      ? "JoyCode · Anthropic"
+                      : "JoyCode · Chat",
+              }))}
               shouldShowApiKey={
+                !isJoycodeProvider &&
                 (category !== "cloud_provider" ||
                   hasApiKeyField(form.getValues("settingsConfig"), "claude")) &&
                 shouldShowApiKey(form.getValues("settingsConfig"), isEditMode)
@@ -2398,7 +2561,7 @@ function ProviderFormFull({
               templateValues={templateValues}
               templatePresetName={templatePreset?.name || ""}
               onTemplateValueChange={handleTemplateValueChange}
-              shouldShowSpeedTest={shouldShowSpeedTest}
+              shouldShowSpeedTest={shouldShowSpeedTest && !isJoycodeProvider}
               baseUrl={baseUrl}
               onBaseUrlChange={handleClaudeBaseUrlChange}
               isEndpointModalOpen={isEndpointModalOpen}
@@ -2408,7 +2571,7 @@ function ProviderFormFull({
               }
               autoSelect={endpointAutoSelect}
               onAutoSelectChange={setEndpointAutoSelect}
-              showEndpointTools
+              showEndpointTools={!isJoycodeProvider}
               shouldShowModelSelector={category !== "official"}
               claudeModel={claudeModel}
               defaultHaikuModel={defaultHaikuModel}
@@ -2440,6 +2603,7 @@ function ProviderFormFull({
           {appId === "codex" && (
             <CodexFormFields
               providerId={providerId}
+              isJoycodeProvider={isJoycodeProvider}
               isXaiOauthPreset={
                 presetProviderType === "xai_oauth" ||
                 initialData?.meta?.providerType === "xai_oauth"
@@ -2474,7 +2638,7 @@ function ProviderFormFull({
               codexOauthRequireExplicitSelection={
                 requiresExplicitCodexOfficialSelection
               }
-              shouldShowSpeedTest={shouldShowSpeedTest}
+              shouldShowSpeedTest={shouldShowSpeedTest && !isJoycodeProvider}
               codexBaseUrl={codexBaseUrl}
               onBaseUrlChange={handleCodexBaseUrlChange}
               isFullUrl={localIsFullUrl}
@@ -2512,7 +2676,7 @@ function ProviderFormFull({
             />
           )}
 
-          {appId === "gemini" && (
+          {appId === "gemini" && !isJoycodeProvider && (
             <GeminiFormFields
               providerId={providerId}
               shouldShowApiKey={shouldShowApiKey(
@@ -2541,7 +2705,7 @@ function ProviderFormFull({
             />
           )}
 
-          {appId === "opencode" && !isAnyOmoCategory && (
+          {appId === "opencode" && !isAnyOmoCategory && !isJoycodeProvider && (
             <OpenCodeFormFields
               npm={opencodeForm.opencodeNpm}
               onNpmChange={opencodeForm.handleOpencodeNpmChange}
@@ -2586,7 +2750,7 @@ function ProviderFormFull({
             )}
 
           {/* OpenClaw 专属字段 */}
-          {appId === "openclaw" && (
+          {appId === "openclaw" && !isJoycodeProvider && (
             <OpenClawFormFields
               baseUrl={openclawForm.openclawBaseUrl}
               onBaseUrlChange={openclawForm.handleOpenclawBaseUrlChange}
@@ -2607,7 +2771,7 @@ function ProviderFormFull({
           )}
 
           {/* Hermes 专属字段 */}
-          {appId === "hermes" && (
+          {appId === "hermes" && !isJoycodeProvider && (
             <HermesFormFields
               baseUrl={hermesForm.hermesBaseUrl}
               onBaseUrlChange={hermesForm.handleHermesBaseUrlChange}
@@ -2630,78 +2794,81 @@ function ProviderFormFull({
           )}
 
           {/* 配置编辑器：Codex、Claude、Gemini 分别使用不同的编辑器 */}
-          {appId === "codex" ? (
-            <>
-              <CodexConfigEditor
-                authValue={codexAuth}
-                configValue={codexConfig}
-                providerName={form.watch("name")}
-                showRemoteCompaction={category !== "official"}
-                isProxyTakeover={isProxyTakeover}
-                onAuthChange={setCodexAuth}
-                onConfigChange={handleCodexConfigChange}
-                useCommonConfig={useCodexCommonConfigFlag}
-                onCommonConfigToggle={handleCodexCommonConfigToggle}
-                commonConfigSnippet={codexCommonConfigSnippet}
-                onCommonConfigSnippetChange={
-                  handleCodexCommonConfigSnippetChange
-                }
-                onCommonConfigErrorClear={clearCodexCommonConfigError}
-                commonConfigError={codexCommonConfigError}
-                authError={codexAuthError}
-                configError={codexConfigError}
-                onExtract={handleCodexExtract}
-                isExtracting={isCodexExtracting}
-              />
-              {settingsConfigErrorField}
-            </>
-          ) : appId === "gemini" ? (
-            <>
-              <GeminiConfigEditor
-                envValue={geminiEnv}
-                configValue={geminiConfig}
-                onEnvChange={handleGeminiEnvChange}
-                onConfigChange={handleGeminiConfigChange}
-                useCommonConfig={useGeminiCommonConfigFlag}
-                onCommonConfigToggle={handleGeminiCommonConfigToggle}
-                commonConfigSnippet={geminiCommonConfigSnippet}
-                onCommonConfigSnippetChange={
-                  handleGeminiCommonConfigSnippetChange
-                }
-                onCommonConfigErrorClear={clearGeminiCommonConfigError}
-                commonConfigError={geminiCommonConfigError}
-                envError={envError}
-                configError={geminiConfigError}
-                onExtract={handleGeminiExtract}
-                isExtracting={isGeminiExtracting}
-              />
-              {settingsConfigErrorField}
-            </>
-          ) : appId === "opencode" &&
-            (category === "omo" || category === "omo-slim") ? (
-            <div className="space-y-2">
-              <Label>{t("provider.configJson")}</Label>
-              <JsonEditor
-                value={omoDraft.mergedOmoJsonPreview}
-                onChange={() => {}}
-                rows={3}
-                showValidation={false}
-                language="json"
-                darkMode={isDarkMode}
-              />
-            </div>
-          ) : appId === "opencode" &&
-            category !== "omo" &&
-            category !== "omo-slim" ? (
-            <>
+          {!isJoycodeProvider &&
+            (appId === "codex" ? (
+              <>
+                <CodexConfigEditor
+                  authValue={codexAuth}
+                  configValue={codexConfig}
+                  providerName={form.watch("name")}
+                  showRemoteCompaction={category !== "official"}
+                  isProxyTakeover={isProxyTakeover}
+                  onAuthChange={setCodexAuth}
+                  onConfigChange={handleCodexConfigChange}
+                  useCommonConfig={useCodexCommonConfigFlag}
+                  onCommonConfigToggle={handleCodexCommonConfigToggle}
+                  commonConfigSnippet={codexCommonConfigSnippet}
+                  onCommonConfigSnippetChange={
+                    handleCodexCommonConfigSnippetChange
+                  }
+                  onCommonConfigErrorClear={clearCodexCommonConfigError}
+                  commonConfigError={codexCommonConfigError}
+                  authError={codexAuthError}
+                  configError={codexConfigError}
+                  onExtract={handleCodexExtract}
+                  isExtracting={isCodexExtracting}
+                />
+                {settingsConfigErrorField}
+              </>
+            ) : appId === "gemini" ? (
+              <>
+                <GeminiConfigEditor
+                  envValue={geminiEnv}
+                  configValue={geminiConfig}
+                  onEnvChange={handleGeminiEnvChange}
+                  onConfigChange={handleGeminiConfigChange}
+                  useCommonConfig={useGeminiCommonConfigFlag}
+                  onCommonConfigToggle={handleGeminiCommonConfigToggle}
+                  commonConfigSnippet={geminiCommonConfigSnippet}
+                  onCommonConfigSnippetChange={
+                    handleGeminiCommonConfigSnippetChange
+                  }
+                  onCommonConfigErrorClear={clearGeminiCommonConfigError}
+                  commonConfigError={geminiCommonConfigError}
+                  envError={envError}
+                  configError={geminiConfigError}
+                  onExtract={handleGeminiExtract}
+                  isExtracting={isGeminiExtracting}
+                />
+                {settingsConfigErrorField}
+              </>
+            ) : appId === "opencode" &&
+              (category === "omo" || category === "omo-slim") ? (
               <div className="space-y-2">
-                <Label htmlFor="settingsConfig">
-                  {t("provider.configJson")}
-                </Label>
+                <Label>{t("provider.configJson")}</Label>
                 <JsonEditor
-                  value={form.getValues("settingsConfig")}
-                  onChange={(config) => form.setValue("settingsConfig", config)}
-                  placeholder={`{
+                  value={omoDraft.mergedOmoJsonPreview}
+                  onChange={() => {}}
+                  rows={3}
+                  showValidation={false}
+                  language="json"
+                  darkMode={isDarkMode}
+                />
+              </div>
+            ) : appId === "opencode" &&
+              category !== "omo" &&
+              category !== "omo-slim" ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="settingsConfig">
+                    {t("provider.configJson")}
+                  </Label>
+                  <JsonEditor
+                    value={form.getValues("settingsConfig")}
+                    onChange={(config) =>
+                      form.setValue("settingsConfig", config)
+                    }
+                    placeholder={`{
   "npm": "@ai-sdk/openai-compatible",
   "options": {
     "baseURL": "https://your-api-endpoint.com",
@@ -2709,72 +2876,74 @@ function ProviderFormFull({
   },
   "models": {}
 }`}
-                  rows={3}
-                  showValidation={true}
-                  language="json"
-                  darkMode={isDarkMode}
-                />
-              </div>
-              {settingsConfigErrorField}
-            </>
-          ) : appId === "openclaw" || appId === "hermes" ? (
-            <>
-              <div className="space-y-2">
-                <Label htmlFor="settingsConfig">
-                  {t("provider.configJson")}
-                </Label>
-                <JsonEditor
-                  value={form.getValues("settingsConfig")}
-                  onChange={(config) => form.setValue("settingsConfig", config)}
-                  placeholder={
-                    appId === "hermes"
-                      ? `{
+                    rows={3}
+                    showValidation={true}
+                    language="json"
+                    darkMode={isDarkMode}
+                  />
+                </div>
+                {settingsConfigErrorField}
+              </>
+            ) : appId === "openclaw" || appId === "hermes" ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="settingsConfig">
+                    {t("provider.configJson")}
+                  </Label>
+                  <JsonEditor
+                    value={form.getValues("settingsConfig")}
+                    onChange={(config) =>
+                      form.setValue("settingsConfig", config)
+                    }
+                    placeholder={
+                      appId === "hermes"
+                        ? `{
   "name": "my-provider",
   "base_url": "https://api.example.com/v1",
   "api_key": ""
 }`
-                      : `{
+                        : `{
   "baseUrl": "https://api.example.com/v1",
   "apiKey": "your-api-key-here",
   "api": "openai-completions",
   "models": []
 }`
-                  }
-                  rows={3}
-                  showValidation={true}
-                  language="json"
-                  darkMode={isDarkMode}
+                    }
+                    rows={3}
+                    showValidation={true}
+                    language="json"
+                    darkMode={isDarkMode}
+                  />
+                </div>
+                <FormField
+                  control={form.control}
+                  name="settingsConfig"
+                  render={() => (
+                    <FormItem className="space-y-0">
+                      <FormMessage />
+                    </FormItem>
+                  )}
                 />
-              </div>
-              <FormField
-                control={form.control}
-                name="settingsConfig"
-                render={() => (
-                  <FormItem className="space-y-0">
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </>
-          ) : (
-            <>
-              <CommonConfigEditor
-                value={form.getValues("settingsConfig")}
-                onChange={(value) => form.setValue("settingsConfig", value)}
-                useCommonConfig={useCommonConfig}
-                onCommonConfigToggle={handleCommonConfigToggle}
-                commonConfigSnippet={commonConfigSnippet}
-                onCommonConfigSnippetChange={handleCommonConfigSnippetChange}
-                commonConfigError={commonConfigError}
-                onEditClick={() => setIsCommonConfigModalOpen(true)}
-                isModalOpen={isCommonConfigModalOpen}
-                onModalClose={() => setIsCommonConfigModalOpen(false)}
-                onExtract={handleClaudeExtract}
-                isExtracting={isClaudeExtracting}
-              />
-              {settingsConfigErrorField}
-            </>
-          )}
+              </>
+            ) : (
+              <>
+                <CommonConfigEditor
+                  value={form.getValues("settingsConfig")}
+                  onChange={(value) => form.setValue("settingsConfig", value)}
+                  useCommonConfig={useCommonConfig}
+                  onCommonConfigToggle={handleCommonConfigToggle}
+                  commonConfigSnippet={commonConfigSnippet}
+                  onCommonConfigSnippetChange={handleCommonConfigSnippetChange}
+                  commonConfigError={commonConfigError}
+                  onEditClick={() => setIsCommonConfigModalOpen(true)}
+                  isModalOpen={isCommonConfigModalOpen}
+                  onModalClose={() => setIsCommonConfigModalOpen(false)}
+                  onExtract={handleClaudeExtract}
+                  isExtracting={isClaudeExtracting}
+                />
+                {settingsConfigErrorField}
+              </>
+            ))}
 
           {!isAnyOmoCategory &&
             appId !== "opencode" &&

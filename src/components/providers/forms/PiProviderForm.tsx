@@ -64,8 +64,13 @@ import {
 } from "@/lib/api/model-fetch";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
-import type { ProviderCategory } from "@/types";
+import type { ProviderCategory, ProviderMeta } from "@/types";
 import { translatePiProviderMutationError } from "@/utils/errorUtils";
+import {
+  JoycodeConnectionFields,
+  type JoycodeCredentialMetadata,
+  type JoycodeNetwork,
+} from "./JoycodeConnectionFields";
 
 const PI_API_FORMATS = [
   { value: "openai-completions", label: "OpenAI Chat Completions" },
@@ -451,6 +456,18 @@ export function PiProviderForm({
   );
   const includeModelsRef = useRef(!isEdit || hasOwn(initialConfig, "models"));
   const [apiKey, setApiKey] = useState(optionalText(initialConfig.apiKey));
+  const [joycodeNetwork, setJoycodeNetwork] = useState<JoycodeNetwork>(() =>
+    initialData?.meta?.joycodeNetwork === "external" ? "external" : "internal",
+  );
+  const [joycodeCredentialMetadata, setJoycodeCredentialMetadata] =
+    useState<JoycodeCredentialMetadata>(() => ({
+      loginType: initialData?.meta?.joycodeLoginType,
+      tenant: initialData?.meta?.joycodeTenant,
+      externalBaseUrl: initialData?.meta?.joycodeExternalBaseUrl,
+    }));
+  const isJoycodeProvider =
+    initialData?.meta?.providerType === "joycode" ||
+    selectedPreset?.providerType === "joycode";
   const initialHeaders = useMemo(
     () => asObject(initialConfig.headers),
     [initialConfig.headers],
@@ -1248,7 +1265,20 @@ export function PiProviderForm({
         providerKey: isEdit ? providerId : trimmedKey,
         presetId: selectedPresetId ?? undefined,
         presetCategory: category,
-        meta: initialData?.meta,
+        meta: {
+          ...(initialData?.meta ?? {}),
+          providerType: isJoycodeProvider ? "joycode" : undefined,
+          joycodeNetwork: isJoycodeProvider ? joycodeNetwork : undefined,
+          joycodeExternalBaseUrl: isJoycodeProvider
+            ? joycodeCredentialMetadata.externalBaseUrl
+            : undefined,
+          joycodeLoginType: isJoycodeProvider
+            ? joycodeCredentialMetadata.loginType
+            : undefined,
+          joycodeTenant: isJoycodeProvider
+            ? joycodeCredentialMetadata.tenant
+            : undefined,
+        } satisfies ProviderMeta,
       };
       await onSubmit(values);
     } catch (error) {
@@ -1323,6 +1353,19 @@ export function PiProviderForm({
           />
         )}
 
+        {isJoycodeProvider && (
+          <JoycodeConnectionFields
+            network={joycodeNetwork}
+            onNetworkChange={setJoycodeNetwork}
+            credential={apiKey}
+            credentialMetadata={joycodeCredentialMetadata}
+            onCredential={(ptKey, metadata) => {
+              if (metadata) setJoycodeCredentialMetadata(metadata);
+              setApiKey(ptKey);
+            }}
+          />
+        )}
+
         {formError && (
           <div
             role="alert"
@@ -1387,60 +1430,67 @@ export function PiProviderForm({
               }
             />
 
-            <Field
-              label={t("opencode.npmPackage", {
-                defaultValue: "接口格式",
-              })}
-              htmlFor="pi-provider-api-select"
-            >
-              <Select value={api} onValueChange={handleApiChange}>
-                <SelectTrigger id="pi-provider-api-select" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PI_API_FORMATS.map((format) => (
-                    <SelectItem key={format.value} value={format.value}>
-                      {format.label}
-                    </SelectItem>
-                  ))}
-                  {!isKnownApiFormat && api && (
-                    <SelectItem value={api}>{api}</SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {t("opencode.npmPackageHint", {
-                  defaultValue: "选择 AI 服务的 API 接口格式",
-                })}
-              </p>
-            </Field>
+            {!isJoycodeProvider && (
+              <>
+                <Field
+                  label={t("opencode.npmPackage", {
+                    defaultValue: "接口格式",
+                  })}
+                  htmlFor="pi-provider-api-select"
+                >
+                  <Select value={api} onValueChange={handleApiChange}>
+                    <SelectTrigger
+                      id="pi-provider-api-select"
+                      className="w-full"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PI_API_FORMATS.map((format) => (
+                        <SelectItem key={format.value} value={format.value}>
+                          {format.label}
+                        </SelectItem>
+                      ))}
+                      {!isKnownApiFormat && api && (
+                        <SelectItem value={api}>{api}</SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {t("opencode.npmPackageHint", {
+                      defaultValue: "选择 AI 服务的 API 接口格式",
+                    })}
+                  </p>
+                </Field>
 
-            <ApiKeySection
-              id="pi-api-key"
-              label={t("pi.form.credential")}
-              value={apiKey}
-              onChange={handleApiKeyChange}
-              category={category}
-              shouldShowLink={Boolean(selectedPreset?.apiKeyUrl)}
-              websiteUrl={selectedPreset?.apiKeyUrl ?? ""}
-              isPartner={selectedPreset?.isPartner}
-              partnerPromotionKey={selectedPreset?.partnerPromotionKey}
-            />
+                <ApiKeySection
+                  id="pi-api-key"
+                  label={t("pi.form.credential")}
+                  value={apiKey}
+                  onChange={handleApiKeyChange}
+                  category={category}
+                  shouldShowLink={Boolean(selectedPreset?.apiKeyUrl)}
+                  websiteUrl={selectedPreset?.apiKeyUrl ?? ""}
+                  isPartner={selectedPreset?.isPartner}
+                  partnerPromotionKey={selectedPreset?.partnerPromotionKey}
+                />
 
-            <div className="space-y-2">
-              <EndpointField
-                id="pi-provider-base-url"
-                label={t("opencode.baseUrl", { defaultValue: "Base URL" })}
-                value={baseUrl}
-                onChange={handleBaseUrlChange}
-                placeholder="https://api.example.com/v1"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t("opencode.baseUrlHint", {
-                  defaultValue: "自定义 API 端点地址",
-                })}
-              </p>
-            </div>
+                <div className="space-y-2">
+                  <EndpointField
+                    id="pi-provider-base-url"
+                    label={t("opencode.baseUrl", { defaultValue: "Base URL" })}
+                    value={baseUrl}
+                    onChange={handleBaseUrlChange}
+                    placeholder="https://api.example.com/v1"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("opencode.baseUrlHint", {
+                      defaultValue: "自定义 API 端点地址",
+                    })}
+                  </p>
+                </div>
+              </>
+            )}
 
             <RequestHeadersEditor
               headers={providerHeaders}
