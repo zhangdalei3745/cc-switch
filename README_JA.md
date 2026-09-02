@@ -100,6 +100,11 @@ Claude Code / Codex / Gemini 公式チャンネルが最安で元価格の 38% /
 </tr>
 
 <tr>
+<td width="180"><a href="https://9527.codes/register?aff=e5zI"><img src="assets/partners/logos/9527-banner.png" alt="9527CODE" width="150"></a></td>
+<td>9527CODE のご支援に感謝します！9527 CODE は、安定性とサービス品質にこだわったエンタープライズ級のフルスペック AI リレープラットフォームです。Claude Code や Codex などの主要 AI モデルに、高速・安定・高品質なリレーサービスを提供します。長期的な安定性、回線品質、継続的な可用性をより重視し、企業や高負荷の AI ユーザーに安定かつ高効率なワンストップのモデル接続ソリューションを提供します。1 年間の継続運営、サービス安定性 99.9%、7×24 時間の有人技術サポート。本プロジェクトの<a href="https://9527.codes/register?aff=e5zI">専用リンク</a>から登録すると、新規ユーザーはカスタマーサポートへのご連絡で体験クレジットを進呈、紹介キャッシュバックは上限なしです！</td>
+</tr>
+
+<tr>
 <td width="180"><a href="https://console.apito.ai/agent/register/pQBql2buaqiX3dDS"><img src="assets/partners/logos/claudeapi.png" alt="ClaudeAPI" width="150"></a></td>
 <td>本プロジェクトは <a href="https://console.apito.ai/agent/register/pQBql2buaqiX3dDS">Claude API</a> がスポンサーです。Claude API 直結 — わずか 3 分で Claude Code や Agent アプリに接続可能。新規ユーザーにはテストクレジットを提供しています。Anthropic 公式キーおよび AWS Bedrock 公式チャネルに基づいており、リバースエンジニアリングや性能劣化はありません。Opus / Sonnet / Haiku の全モデルラインナップをサポートし、Tool Use や 1M コンテキストなどの公式機能をすべて保持しています。Claude Code ヘビーユーザー、Agent エンジニア、企業技術チームに最適です。請求書発行およびチーム対応が可能です。<a href="https://console.apito.ai/agent/register/pQBql2buaqiX3dDS">こちら</a>から登録してください！</td>
 </tr>

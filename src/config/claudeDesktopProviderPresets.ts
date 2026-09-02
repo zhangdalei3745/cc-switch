@@ -389,6 +389,24 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     icon: "apikeyfun",
   },
   {
+    name: "9527CODE",
+    websiteUrl: "https://9527.codes",
+    apiKeyUrl: "https://9527.codes/register?aff=e5zI",
+    category: "aggregator",
+    baseUrl: "https://9527.codes",
+    mode: "direct",
+    apiFormat: "anthropic",
+    modelRoutes: passthroughRoutes(),
+    endpointCandidates: [
+      "https://9527.codes",
+      "https://api.9527.codes",
+      "https://cdn.9527.codes",
+    ],
+    isPartner: true,
+    partnerPromotionKey: "9527code",
+    icon: "9527code",
+  },
+  {
     name: "ClaudeAPI",
     websiteUrl: "https://www.apito.ai",
     apiKeyUrl: "https://console.apito.ai/agent/register/pQBql2buaqiX3dDS",
@@ -1453,5 +1471,24 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     endpointCandidates: ["https://api.jiekou.ai/anthropic"],
     icon: "jiekou",
     iconColor: "#000000",
+  },
+  {
+    name: "AICodeWith",
+    websiteUrl: "https://aicodewith.ai",
+    apiKeyUrl: "https://aicodewith.ai/login?tab=register",
+    category: "aggregator",
+    baseUrl: "https://api.aicodewith.ai",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    // 上游 Haiku 模型 ID 带日期后缀，与角色路由 ID claude-haiku-4-5 不同，
+    // 故用 mappedRoutes 显式映射而非 passthroughRoutes。
+    modelRoutes: mappedRoutes(
+      "claude-sonnet-5",
+      "claude-opus-5",
+      "claude-haiku-4-5-20251001",
+    ),
+    endpointCandidates: ["https://api.aicodewith.ai"],
+    icon: "aicodewith",
+    iconColor: "#3A3B40",
   },
 ];
