@@ -3,7 +3,7 @@
 - 日期：2026-09-03
 - 工作分支：`fix/joycode-claude-error`
 - 基线：`origin/main`，`e9d33d14e19bf4cb8996b9f2655fea77452f73d5`
-- 核心修复提交：`4b365b4c fix(joycode)：兼容 Claude 自适应思考并识别流式业务错误`
+- 相关修复提交：`4b365b4c`（思考与业务错误）、`3b534e97` / `b034d5c6`（Codex 工具字段）；本次补充根 schema 组合关键字兼容
 - 影响范围：仅 JoyCode 的 Anthropic 请求/响应链路
 
 ## 1. 问题背景
@@ -13,6 +13,7 @@ JoyCode 目录中的新 Claude 模型使用 Anthropic wire API，但在 Claude C
 1. Claude Opus 4.6/4.7/4.8、Claude Sonnet 4.6 的扩展思考参数仍可能使用旧的 `thinking.enabled + budget_tokens` 形式，未转换为 JoyCode 当前模型接受的自适应思考参数。
 2. JoyCode 可能以 HTTP 200 返回包含业务错误的 JSON 或 SSE 包装；原链路可能继续按正常流处理，导致错误信息延迟、丢失或表现为流式解析异常。
 3. Codex Responses 函数工具携带的顶层 `strict` 字段会被通用 Responses→Anthropic 转换保留，但 JoyCode 当前 Anthropic 适配器不接受该可选字段，并返回 `tools.N.custom.strict: Extra inputs are not permitted`。
+4. Codex 内置工具可能在 `input_schema` 根节点使用 `oneOf`、`anyOf` 或 `allOf`。JoyCode Claude 的 Anthropic 适配器会返回 HTTP 400：`input_schema does not support oneOf, allOf, or anyOf at the top level`。
 
 本次修复严格限定在 JoyCode Anthropic 路径，没有修改其他供应商，也没有改变 JoyCode 非 Claude 模型的协议行为。
 
@@ -43,7 +44,14 @@ JoyCode 目录中的新 Claude 模型使用 Anthropic wire API，但在 Claude C
 
 ### 2.3 Codex 工具字段兼容
 
-仅在 Codex 等 Responses 客户端经过 `Responses → Anthropic` 转换、且上游模型为 JoyCode Anthropic 时，移除每个工具对象顶层的 `strict` 字段。JSON Schema 中的 `input_schema`、`required` 和 `additionalProperties` 保持不变，因此不会损失工具参数约束。Claude Code 和 Claude Desktop 的原生 Anthropic 请求不会进入该清理分支，工具定义保持原样；JoyCode Responses、Chat 以及其他供应商也继续保留原有行为。
+仅在 Codex 等 Responses 客户端经过 `Responses → Anthropic` 转换、且上游模型为 JoyCode Anthropic 时：
+
+- 移除每个工具对象顶层的 `strict` 字段。
+- 将 `input_schema` 根节点的 `oneOf` / `anyOf` 展开为普通对象：合并分支属性，只保留所有分支共同要求的必填字段。
+- 将根节点的 `allOf` 展开为普通对象：合并分支属性和全部必填字段。
+- 同一属性在不同分支定义不同时，保留为该属性内部的 `anyOf`；已实测 JoyCode Claude 接受嵌套组合结构，拒绝范围仅为 `input_schema` 根节点。
+
+该转换不改变工具调用参数的外层结构。Claude Code 和 Claude Desktop 的原生 Anthropic 请求不会进入清理分支，工具定义保持原样；JoyCode Responses、Chat 以及其他供应商也继续保留原有行为。
 
 ## 3. 三客户端协议链路
 
@@ -93,7 +101,9 @@ src-tauri/src/proxy/providers/joycode.rs
 
 已通过以下检查：
 
-- JoyCode 单元测试：34 passed，1 ignored。
+- JoyCode 定向单元测试：40 passed，1 ignored。
+- 新增顶层 `oneOf` / `anyOf` / `allOf` 展开测试，并验证原生 Anthropic 请求仍保留原 schema。
+- 使用当前 JoyCode Claude Opus 路由实测嵌套属性 `anyOf`，HTTP 200，确认不会触发同类校验错误。
 - JoyCode Anthropic stream-start 定向测试：2 passed。
 - Claude Desktop proxy 定向测试：11 passed。
 - Codex adaptive thinking 与 signed thinking 工具循环测试：2 passed。
@@ -106,7 +116,7 @@ src-tauri/src/proxy/providers/joycode.rs
 
 ## 6. 风险与边界
 
-- 自适应思考和响应错误处理只在 `providerType=joycode` 且实际 wire API 为 Anthropic 时生效。工具 `strict` 清理进一步限定在 Responses→Anthropic 转换分支，Claude Code 和 Claude Desktop 原生 Anthropic 请求不受该清理影响。
+- 自适应思考和响应错误处理只在 `providerType=joycode` 且实际 wire API 为 Anthropic 时生效。工具 `strict` 和根 schema 组合关键字清理进一步限定在 Responses→Anthropic 转换分支，Claude Code 和 Claude Desktop 原生 Anthropic 请求不受该清理影响。
 - 当前验证覆盖源码链路、模型目录、当前配置和定向测试。
 - 已安装的 `/Applications/CC Switch.app` 仍可能是旧二进制；严格运行时 E2E 需要构建、安装并重启当前分支版本后，分别从 Claude Code、Claude Desktop 和 Codex 发起真实请求。
 - 如果现场返回 HTTP 504，通常表示请求已到达 JoyCode/nginx 后发生上游超时；应结合 CC Switch 请求日志和 JoyCode 返回体区分协议错误与上游服务超时。
