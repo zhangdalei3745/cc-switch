@@ -1684,6 +1684,19 @@ impl RequestForwarder {
         } else if codex_responses_to_anthropic {
             let mut mapped_body = mapped_body;
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            if is_joycode
+                && matches!(
+                    joycode_wire_api,
+                    Some(super::providers::joycode::JoycodeWireApi::Anthropic)
+                )
+                && super::providers::joycode::promote_codex_anthropic_additional_tools(
+                    &mut mapped_body,
+                )
+            {
+                log::debug!(
+                    "[JoyCode] Promoted Codex additional_tools before Responses→Anthropic conversion"
+                );
+            }
             // Per-provider output ceiling override. Codex does not forward its
             // `model_max_output_tokens` in the request body, so honor the value
             // configured on the provider here — it takes precedence over any
@@ -1788,8 +1801,8 @@ impl RequestForwarder {
                     &codex_anthropic_cache_config(&self.optimizer_config),
                 );
                 if codex_responses_to_anthropic {
-                    // JoyCode rejects the optional top-level `strict` metadata emitted
-                    // by Responses function tools. Scope this compatibility cleanup to
+                    // JoyCode rejects optional Responses tool metadata and root JSON
+                    // Schema combinators. Scope this compatibility cleanup to
                     // Responses→Anthropic conversion so native Claude/Claude Desktop
                     // requests keep their original Anthropic tool definitions.
                     super::providers::joycode::sanitize_codex_anthropic_tools(&mut request_body);

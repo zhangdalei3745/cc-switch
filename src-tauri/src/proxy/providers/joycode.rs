@@ -13,7 +13,7 @@ use futures::StreamExt;
 use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -1590,19 +1590,217 @@ fn normalize_anthropic_thinking(body: &mut Value) {
     }
 }
 
+fn schema_required_fields(schema: &Value) -> Vec<String> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn merge_schema_property(properties: &mut Map<String, Value>, name: &str, schema: &Value) {
+    let Some(existing) = properties.get_mut(name) else {
+        properties.insert(name.to_string(), schema.clone());
+        return;
+    };
+    if existing == schema {
+        return;
+    }
+
+    // A property can have different shapes in separate root union branches. Keep
+    // those alternatives below the object root: JoyCode rejects combinators only
+    // at `input_schema` itself, while nested property schemas remain supported.
+    let mut variants = existing
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![existing.clone()]);
+    if !variants.contains(schema) {
+        variants.push(schema.clone());
+    }
+    *existing = json!({ "anyOf": variants });
+}
+
+fn merge_object_schema_branches(
+    root: &mut Map<String, Value>,
+    branches: &[Value],
+    require_all: bool,
+) {
+    let object_branches = branches
+        .iter()
+        .filter_map(Value::as_object)
+        .collect::<Vec<_>>();
+    if object_branches.is_empty() {
+        return;
+    }
+
+    let mut properties = root
+        .remove("properties")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let root_required = schema_required_fields(&Value::Object(root.clone()));
+    root.remove("required");
+    let mut branch_required: Option<Vec<String>> = None;
+
+    for branch in object_branches {
+        if let Some(branch_properties) = branch.get("properties").and_then(Value::as_object) {
+            for (name, schema) in branch_properties {
+                merge_schema_property(&mut properties, name, schema);
+            }
+        }
+
+        let required = schema_required_fields(&Value::Object(branch.clone()));
+        branch_required = Some(match branch_required {
+            None => required,
+            Some(existing) if require_all => {
+                let mut merged = existing;
+                for field in required {
+                    if !merged.contains(&field) {
+                        merged.push(field);
+                    }
+                }
+                merged
+            }
+            Some(existing) => existing
+                .into_iter()
+                .filter(|field| required.contains(field))
+                .collect(),
+        });
+    }
+
+    let mut required = root_required;
+    for field in branch_required.unwrap_or_default() {
+        if !required.contains(&field) {
+            required.push(field);
+        }
+    }
+    root.insert("properties".to_string(), Value::Object(properties));
+    if !required.is_empty() {
+        root.insert(
+            "required".to_string(),
+            Value::Array(required.into_iter().map(Value::String).collect()),
+        );
+    }
+}
+
+fn sanitize_codex_anthropic_input_schema(schema: &mut Value) {
+    let Some(root) = schema.as_object_mut() else {
+        *schema = json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+        });
+        return;
+    };
+
+    // JoyCode's Anthropic adapter rejects root combinators even though they are
+    // valid JSON Schema. Flatten them without changing the tool argument shape:
+    // - oneOf/anyOf: merge properties and keep only fields required by every arm;
+    // - allOf: merge properties and require the union of every arm's requirements.
+    // Nested combinators are left untouched because the adapter error is scoped to
+    // the input_schema root and they preserve conflicting property alternatives.
+    for (key, require_all) in [("oneOf", false), ("anyOf", false), ("allOf", true)] {
+        let branches = root.remove(key).and_then(|value| value.as_array().cloned());
+        if let Some(branches) = branches {
+            merge_object_schema_branches(root, &branches, require_all);
+        }
+    }
+
+    root.insert("type".to_string(), json!("object"));
+    root.entry("properties".to_string())
+        .or_insert_with(|| json!({}));
+}
+
+/// Move Codex Responses Lite `additional_tools` carriers into the top-level
+/// tool list before the shared Responses→Anthropic conversion builds its tool
+/// context. JoyCode's native Responses endpoint understands the carrier, but an
+/// Anthropic request has no equivalent input item and would otherwise lose the
+/// dynamically loaded tools.
+///
+/// This helper is called only for JoyCode Responses→Anthropic routing. Native
+/// Claude/Claude Desktop requests and JoyCode native Responses requests do not
+/// pass through it.
+pub fn promote_codex_anthropic_additional_tools(body: &mut Value) -> bool {
+    let Some(input) = body.get("input").and_then(Value::as_array) else {
+        return false;
+    };
+    if !input.iter().any(|item| {
+        item.get("type").and_then(Value::as_str) == Some("additional_tools")
+            && item.get("role").and_then(Value::as_str) == Some("developer")
+    }) {
+        return false;
+    }
+
+    let mut tools = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut seen = tools
+        .iter()
+        .map(codex_tool_dedup_key)
+        .collect::<HashSet<_>>();
+    let mut retained_input = Vec::with_capacity(input.len());
+
+    for item in input {
+        let is_valid_carrier = item.get("type").and_then(Value::as_str) == Some("additional_tools")
+            && item.get("role").and_then(Value::as_str) == Some("developer");
+        if !is_valid_carrier {
+            retained_input.push(item.clone());
+            continue;
+        }
+        if let Some(additional_tools) = item.get("tools").and_then(Value::as_array) {
+            for tool in additional_tools {
+                if seen.insert(codex_tool_dedup_key(tool)) {
+                    tools.push(tool.clone());
+                }
+            }
+        }
+    }
+
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    object.insert("input".to_string(), Value::Array(retained_input));
+    if !tools.is_empty() {
+        object.insert("tools".to_string(), Value::Array(tools));
+    }
+    true
+}
+
+fn codex_tool_dedup_key(tool: &Value) -> String {
+    let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("");
+    let identity = tool
+        .get("name")
+        .or_else(|| tool.get("server_label"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !tool_type.is_empty() && !identity.is_empty() {
+        format!("{tool_type}\u{0}{identity}")
+    } else {
+        serde_json::to_string(tool).unwrap_or_default()
+    }
+}
+
 pub fn sanitize_codex_anthropic_tools(body: &mut Value) {
     let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
     };
 
-    // OpenAI Responses function tools can carry a top-level `strict` flag. The
-    // Codex→Anthropic converter preserves it for Anthropic-compatible providers,
-    // but JoyCode's current Anthropic adapter rejects that optional field with
-    // `tools.N.custom.strict: Extra inputs are not permitted`. Keep the JSON
-    // input schema itself intact and remove only the unsupported tool metadata.
+    // OpenAI Responses tools can carry metadata and root JSON Schema constructs
+    // accepted by Codex but rejected by JoyCode's Anthropic adapter. Apply this
+    // only after Responses→Anthropic conversion; native Anthropic clients retain
+    // their original tool definitions.
     for tool in tools {
-        if let Some(object) = tool.as_object_mut() {
-            object.remove("strict");
+        let Some(object) = tool.as_object_mut() else {
+            continue;
+        };
+        object.remove("strict");
+        if let Some(schema) = object.get_mut("input_schema") {
+            sanitize_codex_anthropic_input_schema(schema);
         }
     }
 }
@@ -3023,6 +3221,96 @@ mod tests {
     }
 
     #[test]
+    fn codex_anthropic_promotes_responses_lite_additional_tools() {
+        let mut input = json!({
+            "model": "Claude-Opus-4.8-hq",
+            "max_output_tokens": 4096,
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{
+                        "type": "namespace",
+                        "name": "functions",
+                        "tools": [{
+                            "type": "function",
+                            "name": "exec",
+                            "description": "Run a command",
+                            "parameters": {
+                                "oneOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {"cmd": {"type": "string"}},
+                                        "required": ["cmd"]
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {"session_id": {"type": "integer"}},
+                                        "required": ["session_id"]
+                                    }
+                                ]
+                            },
+                            "strict": true
+                        }]
+                    }]
+                },
+                {
+                    "type": "agent_message",
+                    "author": "worker",
+                    "recipient": "root",
+                    "content": [{"type": "input_text", "text": "analysis complete"}]
+                }
+            ],
+            "tools": [{
+                "type": "function",
+                "name": "read_file",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        });
+
+        assert!(promote_codex_anthropic_additional_tools(&mut input));
+        assert_eq!(input["input"].as_array().map(Vec::len), Some(1));
+        assert_eq!(input["tools"].as_array().map(Vec::len), Some(2));
+
+        let mut body =
+            crate::proxy::providers::transform_codex_anthropic::responses_request_to_anthropic(
+                input, 4096,
+            )
+            .expect("Codex request should convert to Anthropic");
+        sanitize_codex_anthropic_tools(&mut body);
+
+        let tools = body["tools"].as_array().expect("Anthropic tools");
+        assert!(tools.iter().any(|tool| tool["name"] == "read_file"));
+        let exec = tools
+            .iter()
+            .find(|tool| tool["name"] == "functions__exec")
+            .expect("promoted namespace child");
+        assert!(exec.get("strict").is_none());
+        assert!(exec["input_schema"].get("oneOf").is_none());
+        assert_eq!(exec["input_schema"]["type"], "object");
+
+        let messages = body["messages"].as_array().expect("Anthropic messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["text"], "analysis complete");
+    }
+
+    #[test]
+    fn codex_anthropic_does_not_promote_invalid_additional_tools_carrier() {
+        let original = json!({
+            "input": [{
+                "type": "additional_tools",
+                "role": "user",
+                "tools": [{"type": "function", "name": "unsafe"}]
+            }]
+        });
+        let mut body = original.clone();
+
+        assert!(!promote_codex_anthropic_additional_tools(&mut body));
+        assert_eq!(body, original);
+    }
+
+    #[test]
     fn codex_anthropic_body_drops_tool_strict_before_joycode() {
         let input = json!({
             "model": "Claude-Opus-4.8-hq",
@@ -3056,6 +3344,121 @@ mod tests {
             body["tools"][0]["input_schema"]["additionalProperties"],
             json!(false)
         );
+    }
+
+    #[test]
+    fn codex_anthropic_body_flattens_root_tool_schema_combinators() {
+        let mut body = json!({
+            "tools": [
+                {
+                    "name": "automation_update",
+                    "strict": true,
+                    "input_schema": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "mode": {"type": "string"},
+                                    "id": {"type": "string"}
+                                },
+                                "required": ["mode", "id"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "mode": {"enum": ["delete"]},
+                                    "name": {"type": "string"}
+                                },
+                                "required": ["mode", "name"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                },
+                {
+                    "name": "combined",
+                    "input_schema": {
+                        "allOf": [
+                            {
+                                "type": "object",
+                                "properties": {"left": {"type": "string"}},
+                                "required": ["left"]
+                            },
+                            {
+                                "type": "object",
+                                "properties": {"right": {"type": "integer"}},
+                                "required": ["right"]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "name": "optional_union",
+                    "input_schema": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                                "required": ["path"]
+                            },
+                            {"type": "null"}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        sanitize_codex_anthropic_tools(&mut body);
+
+        let union = &body["tools"][0]["input_schema"];
+        assert_eq!(union["type"], json!("object"));
+        assert!(union.get("oneOf").is_none());
+        assert!(union.get("anyOf").is_none());
+        assert!(union.get("allOf").is_none());
+        assert_eq!(union["required"], json!(["mode"]));
+        assert!(union["properties"].get("id").is_some());
+        assert!(union["properties"].get("name").is_some());
+        assert_eq!(
+            union["properties"]["mode"]["anyOf"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(body["tools"][0].get("strict").is_none());
+
+        let combined = &body["tools"][1]["input_schema"];
+        assert_eq!(combined["type"], json!("object"));
+        assert!(combined.get("allOf").is_none());
+        assert_eq!(combined["required"], json!(["left", "right"]));
+        assert!(combined["properties"].get("left").is_some());
+        assert!(combined["properties"].get("right").is_some());
+
+        let optional = &body["tools"][2]["input_schema"];
+        assert_eq!(optional["type"], json!("object"));
+        assert!(optional.get("anyOf").is_none());
+        assert!(optional["properties"].get("path").is_some());
+        assert!(optional.get("required").is_none());
+    }
+
+    #[test]
+    fn native_anthropic_body_preserves_root_tool_schema_combinator() {
+        let mut body = json!({
+            "model": "Claude-Opus-4.8-hq",
+            "tools": [{
+                "name": "native_union",
+                "input_schema": {
+                    "oneOf": [
+                        {"type": "object", "properties": {"a": {"type": "string"}}},
+                        {"type": "object", "properties": {"b": {"type": "string"}}}
+                    ]
+                }
+            }]
+        });
+
+        decorate_body(&mut body, JoycodeWireApi::Anthropic);
+
+        assert!(body["tools"][0]["input_schema"].get("oneOf").is_some());
     }
 
     #[test]
