@@ -123,6 +123,9 @@ src-tauri/src/proxy/providers/joycode.rs
 | 顶层及工具级 `cache_control` | 通过 | 保留 |
 | `eager_input_streaming` | 通过 | 保留 |
 | `defer_loading` | 字段被识别；仅有 deferred 工具时按规则拒绝 | 不按“不兼容字段”删除 |
+| `thinking.type=enabled`（新 Claude 模型） | 不支持旧式 budget 配置 | 仅 JoyCode 新模型转换为 `adaptive + output_config.effort` |
+| `output_config.effort` | 通过 | 保留，供 adaptive thinking 使用 |
+| `context_management` | 当前 JoyCode 适配器不接受 | 仅 JoyCode Anthropic 删除可选服务端压缩提示，完整消息历史仍保留 |
 | `service_tier` | 模型不支持 | 当前 Codex→Anthropic 本就不透传；原生请求不静默降级 |
 | `top_k` | 当前模型已废弃 | 当前 Codex→Anthropic 本就不透传；原生请求不静默改采样语义 |
 | `output_config.format` | `Extra inputs are not permitted` | 不静默删除结构化输出约束，记录为上游能力缺口 |
