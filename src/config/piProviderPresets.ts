@@ -445,6 +445,33 @@ const piProviderPresetDefinitions: PiProviderPreset[] = [
     icon: "apikeyfun",
   },
   {
+    name: "9527CODE",
+    providerKey: "cc-switch-9527-code",
+    websiteUrl: "https://9527.codes",
+    apiKeyUrl: "https://9527.codes/register?aff=e5zI",
+    settingsConfig: {
+      name: "9527CODE",
+      baseUrl: "https://9527.codes",
+      api: "anthropic-messages",
+      apiKey: "",
+      models: [
+        piModel("anthropic/claude-opus-5", {
+          id: "claude-opus-5",
+        }),
+        piModel("anthropic/claude-sonnet-5", {
+          id: "claude-sonnet-5",
+        }),
+        piModel("anthropic/claude-haiku-4.5", {
+          id: "claude-haiku-4-5",
+        }),
+      ],
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "9527code",
+    icon: "9527code",
+  },
+  {
     name: "Code0",
     providerKey: "cc-switch-code0",
     websiteUrl: "https://code0.ai",
@@ -1494,6 +1521,27 @@ const piProviderPresetDefinitions: PiProviderPreset[] = [
     },
     category: "aggregator",
     icon: "pipellm",
+  },
+  {
+    name: "AICodeWith",
+    providerKey: "cc-switch-aicode-with",
+    websiteUrl: "https://aicodewith.ai",
+    apiKeyUrl: "https://aicodewith.ai/login?tab=register",
+    settingsConfig: {
+      name: "AICodeWith",
+      baseUrl: "https://api.aicodewith.ai/chatgpt/v1",
+      api: "openai-responses",
+      apiKey: "",
+      models: [
+        piModel("openai/gpt-5.6-sol", {
+          id: "gpt-5.6-sol",
+          name: "gpt-5.6-sol",
+        }),
+      ],
+    },
+    category: "aggregator",
+    icon: "aicodewith",
+    iconColor: "#3A3B40",
   },
   {
     name: "E-FlowCode",
