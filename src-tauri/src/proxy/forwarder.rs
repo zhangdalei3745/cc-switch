@@ -1684,6 +1684,19 @@ impl RequestForwarder {
         } else if codex_responses_to_anthropic {
             let mut mapped_body = mapped_body;
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            if is_joycode
+                && matches!(
+                    joycode_wire_api,
+                    Some(super::providers::joycode::JoycodeWireApi::Anthropic)
+                )
+                && super::providers::joycode::promote_codex_anthropic_additional_tools(
+                    &mut mapped_body,
+                )
+            {
+                log::debug!(
+                    "[JoyCode] Promoted Codex additional_tools before Responses→Anthropic conversion"
+                );
+            }
             // Per-provider output ceiling override. Codex does not forward its
             // `model_max_output_tokens` in the request body, so honor the value
             // configured on the provider here — it takes precedence over any

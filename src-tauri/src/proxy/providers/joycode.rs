@@ -1714,6 +1714,77 @@ fn sanitize_codex_anthropic_input_schema(schema: &mut Value) {
         .or_insert_with(|| json!({}));
 }
 
+/// Move Codex Responses Lite `additional_tools` carriers into the top-level
+/// tool list before the shared Responses→Anthropic conversion builds its tool
+/// context. JoyCode's native Responses endpoint understands the carrier, but an
+/// Anthropic request has no equivalent input item and would otherwise lose the
+/// dynamically loaded tools.
+///
+/// This helper is called only for JoyCode Responses→Anthropic routing. Native
+/// Claude/Claude Desktop requests and JoyCode native Responses requests do not
+/// pass through it.
+pub fn promote_codex_anthropic_additional_tools(body: &mut Value) -> bool {
+    let Some(input) = body.get("input").and_then(Value::as_array) else {
+        return false;
+    };
+    if !input.iter().any(|item| {
+        item.get("type").and_then(Value::as_str) == Some("additional_tools")
+            && item.get("role").and_then(Value::as_str) == Some("developer")
+    }) {
+        return false;
+    }
+
+    let mut tools = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut seen = tools
+        .iter()
+        .map(codex_tool_dedup_key)
+        .collect::<HashSet<_>>();
+    let mut retained_input = Vec::with_capacity(input.len());
+
+    for item in input {
+        let is_valid_carrier = item.get("type").and_then(Value::as_str) == Some("additional_tools")
+            && item.get("role").and_then(Value::as_str) == Some("developer");
+        if !is_valid_carrier {
+            retained_input.push(item.clone());
+            continue;
+        }
+        if let Some(additional_tools) = item.get("tools").and_then(Value::as_array) {
+            for tool in additional_tools {
+                if seen.insert(codex_tool_dedup_key(tool)) {
+                    tools.push(tool.clone());
+                }
+            }
+        }
+    }
+
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    object.insert("input".to_string(), Value::Array(retained_input));
+    if !tools.is_empty() {
+        object.insert("tools".to_string(), Value::Array(tools));
+    }
+    true
+}
+
+fn codex_tool_dedup_key(tool: &Value) -> String {
+    let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("");
+    let identity = tool
+        .get("name")
+        .or_else(|| tool.get("server_label"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !tool_type.is_empty() && !identity.is_empty() {
+        format!("{tool_type}\u{0}{identity}")
+    } else {
+        serde_json::to_string(tool).unwrap_or_default()
+    }
+}
+
 pub fn sanitize_codex_anthropic_tools(body: &mut Value) {
     let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
@@ -3147,6 +3218,96 @@ mod tests {
             tools[0]["input_schema"]["additionalProperties"],
             json!(false)
         );
+    }
+
+    #[test]
+    fn codex_anthropic_promotes_responses_lite_additional_tools() {
+        let mut input = json!({
+            "model": "Claude-Opus-4.8-hq",
+            "max_output_tokens": 4096,
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{
+                        "type": "namespace",
+                        "name": "functions",
+                        "tools": [{
+                            "type": "function",
+                            "name": "exec",
+                            "description": "Run a command",
+                            "parameters": {
+                                "oneOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {"cmd": {"type": "string"}},
+                                        "required": ["cmd"]
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {"session_id": {"type": "integer"}},
+                                        "required": ["session_id"]
+                                    }
+                                ]
+                            },
+                            "strict": true
+                        }]
+                    }]
+                },
+                {
+                    "type": "agent_message",
+                    "author": "worker",
+                    "recipient": "root",
+                    "content": [{"type": "input_text", "text": "analysis complete"}]
+                }
+            ],
+            "tools": [{
+                "type": "function",
+                "name": "read_file",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        });
+
+        assert!(promote_codex_anthropic_additional_tools(&mut input));
+        assert_eq!(input["input"].as_array().map(Vec::len), Some(1));
+        assert_eq!(input["tools"].as_array().map(Vec::len), Some(2));
+
+        let mut body =
+            crate::proxy::providers::transform_codex_anthropic::responses_request_to_anthropic(
+                input, 4096,
+            )
+            .expect("Codex request should convert to Anthropic");
+        sanitize_codex_anthropic_tools(&mut body);
+
+        let tools = body["tools"].as_array().expect("Anthropic tools");
+        assert!(tools.iter().any(|tool| tool["name"] == "read_file"));
+        let exec = tools
+            .iter()
+            .find(|tool| tool["name"] == "functions__exec")
+            .expect("promoted namespace child");
+        assert!(exec.get("strict").is_none());
+        assert!(exec["input_schema"].get("oneOf").is_none());
+        assert_eq!(exec["input_schema"]["type"], "object");
+
+        let messages = body["messages"].as_array().expect("Anthropic messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["text"], "analysis complete");
+    }
+
+    #[test]
+    fn codex_anthropic_does_not_promote_invalid_additional_tools_carrier() {
+        let original = json!({
+            "input": [{
+                "type": "additional_tools",
+                "role": "user",
+                "tools": [{"type": "function", "name": "unsafe"}]
+            }]
+        });
+        let mut body = original.clone();
+
+        assert!(!promote_codex_anthropic_additional_tools(&mut body));
+        assert_eq!(body, original);
     }
 
     #[test]
