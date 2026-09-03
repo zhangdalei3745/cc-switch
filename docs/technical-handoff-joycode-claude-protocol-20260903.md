@@ -12,6 +12,7 @@ JoyCode 目录中的新 Claude 模型使用 Anthropic wire API，但在 Claude C
 
 1. Claude Opus 4.6/4.7/4.8、Claude Sonnet 4.6 的扩展思考参数仍可能使用旧的 `thinking.enabled + budget_tokens` 形式，未转换为 JoyCode 当前模型接受的自适应思考参数。
 2. JoyCode 可能以 HTTP 200 返回包含业务错误的 JSON 或 SSE 包装；原链路可能继续按正常流处理，导致错误信息延迟、丢失或表现为流式解析异常。
+3. Codex Responses 函数工具携带的顶层 `strict` 字段会被通用 Responses→Anthropic 转换保留，但 JoyCode 当前 Anthropic 适配器不接受该可选字段，并返回 `tools.N.custom.strict: Extra inputs are not permitted`。
 
 本次修复严格限定在 JoyCode Anthropic 路径，没有修改其他供应商，也没有改变 JoyCode 非 Claude 模型的协议行为。
 
@@ -39,6 +40,10 @@ JoyCode 目录中的新 Claude 模型使用 Anthropic wire API，但在 Claude C
 - 解包 JoyCode 可能返回的双层 SSE 数据。
 - 当错误同时包含外层描述和 `error.cause` 时，优先暴露更具体的 cause。
 - 保留正常 Anthropic SSE 事件及流式响应，不进行全量缓冲。
+
+### 2.3 Codex 工具字段兼容
+
+在 JoyCode Anthropic 请求发送前移除每个工具对象顶层的 `strict` 字段。JSON Schema 中的 `input_schema`、`required` 和 `additionalProperties` 保持不变，因此不会损失工具参数约束。该处理仅作用于 JoyCode Anthropic 路径；JoyCode Responses、Chat 以及其他供应商继续保留原有行为。
 
 ## 3. 三客户端协议链路
 
@@ -88,7 +93,7 @@ src-tauri/src/proxy/providers/joycode.rs
 
 已通过以下检查：
 
-- JoyCode 单元测试：31 passed，1 ignored。
+- JoyCode 单元测试：34 passed，1 ignored。
 - JoyCode Anthropic stream-start 定向测试：2 passed。
 - Claude Desktop proxy 定向测试：11 passed。
 - Codex adaptive thinking 与 signed thinking 工具循环测试：2 passed。

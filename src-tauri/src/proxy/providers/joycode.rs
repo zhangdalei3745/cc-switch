@@ -1590,6 +1590,23 @@ fn normalize_anthropic_thinking(body: &mut Value) {
     }
 }
 
+fn sanitize_anthropic_tools(body: &mut Value) {
+    let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    // OpenAI Responses function tools can carry a top-level `strict` flag. The
+    // Codex→Anthropic converter preserves it for Anthropic-compatible providers,
+    // but JoyCode's current Anthropic adapter rejects that optional field with
+    // `tools.N.custom.strict: Extra inputs are not permitted`. Keep the JSON
+    // input schema itself intact and remove only the unsupported tool metadata.
+    for tool in tools {
+        if let Some(object) = tool.as_object_mut() {
+            object.remove("strict");
+        }
+    }
+}
+
 pub fn decorate_body(body: &mut Value, wire_api: JoycodeWireApi) {
     if wire_api == JoycodeWireApi::Anthropic {
         // Claude Code 2.1.235 sends the newer context-management beta field.
@@ -1604,6 +1621,7 @@ pub fn decorate_body(body: &mut Value, wire_api: JoycodeWireApi) {
         // Normalize only JoyCode's Anthropic requests so other providers retain
         // their existing thinking semantics.
         normalize_anthropic_thinking(body);
+        sanitize_anthropic_tools(body);
     }
     body["client"] = Value::String(JOYCODE_CLIENT.to_string());
     body["clientVersion"] = Value::String(JOYCODE_CLIENT_VERSION.to_string());
@@ -2967,6 +2985,92 @@ mod tests {
         assert_eq!(sonnet.id, "Claude-Sonnet-4.6-hq");
         assert_eq!(opus.id, "Claude-Opus-4.8-hq");
         assert_eq!(codex_default_model(&models).unwrap().id, "GPT-5.6 Sol");
+    }
+
+    #[test]
+    fn anthropic_body_drops_unsupported_tool_strict() {
+        let mut body = json!({
+            "model": "Claude-Opus-4.8-hq",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {
+                    "name": "apply_patch",
+                    "description": "Apply a patch",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"input": {"type": "string"}},
+                        "required": ["input"],
+                        "additionalProperties": false
+                    },
+                    "strict": true
+                },
+                {
+                    "name": "read_file",
+                    "input_schema": {"type": "object", "properties": {}},
+                    "strict": false
+                }
+            ]
+        });
+
+        decorate_body(&mut body, JoycodeWireApi::Anthropic);
+
+        let tools = body["tools"].as_array().expect("tools array");
+        assert!(tools.iter().all(|tool| tool.get("strict").is_none()));
+        assert_eq!(
+            tools[0]["input_schema"]["additionalProperties"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn codex_anthropic_body_drops_tool_strict_before_joycode() {
+        let input = json!({
+            "model": "Claude-Opus-4.8-hq",
+            "max_output_tokens": 4096,
+            "input": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": false
+                },
+                "strict": true
+            }]
+        });
+        let mut body =
+            crate::proxy::providers::transform_codex_anthropic::responses_request_to_anthropic(
+                input, 4096,
+            )
+            .expect("Codex request should convert to Anthropic");
+        assert_eq!(body["tools"][0]["strict"], json!(true));
+
+        decorate_body(&mut body, JoycodeWireApi::Anthropic);
+
+        assert!(body["tools"][0].get("strict").is_none());
+        assert_eq!(
+            body["tools"][0]["input_schema"]["additionalProperties"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn non_anthropic_body_preserves_tool_strict() {
+        let mut body = json!({
+            "model": "GPT-5.6 Sol",
+            "tools": [{
+                "name": "apply_patch",
+                "input_schema": {"type": "object", "properties": {}},
+                "strict": true
+            }]
+        });
+
+        decorate_body(&mut body, JoycodeWireApi::Responses);
+
+        assert_eq!(body["tools"][0]["strict"], json!(true));
     }
 
     #[test]
