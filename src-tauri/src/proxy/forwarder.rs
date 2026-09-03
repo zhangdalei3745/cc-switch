@@ -1787,6 +1787,13 @@ impl RequestForwarder {
                     &mut request_body,
                     &codex_anthropic_cache_config(&self.optimizer_config),
                 );
+                if codex_responses_to_anthropic {
+                    // JoyCode rejects the optional top-level `strict` metadata emitted
+                    // by Responses function tools. Scope this compatibility cleanup to
+                    // Responses→Anthropic conversion so native Claude/Claude Desktop
+                    // requests keep their original Anthropic tool definitions.
+                    super::providers::joycode::sanitize_codex_anthropic_tools(&mut request_body);
+                }
             } else if route.wire_api == super::providers::joycode::JoycodeWireApi::Chat
                 && joycode_stable_session_id.is_some()
                 && request_body.get("prompt_cache_key").is_none()

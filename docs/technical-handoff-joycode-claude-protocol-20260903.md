@@ -43,7 +43,7 @@ JoyCode 目录中的新 Claude 模型使用 Anthropic wire API，但在 Claude C
 
 ### 2.3 Codex 工具字段兼容
 
-在 JoyCode Anthropic 请求发送前移除每个工具对象顶层的 `strict` 字段。JSON Schema 中的 `input_schema`、`required` 和 `additionalProperties` 保持不变，因此不会损失工具参数约束。该处理仅作用于 JoyCode Anthropic 路径；JoyCode Responses、Chat 以及其他供应商继续保留原有行为。
+仅在 Codex 等 Responses 客户端经过 `Responses → Anthropic` 转换、且上游模型为 JoyCode Anthropic 时，移除每个工具对象顶层的 `strict` 字段。JSON Schema 中的 `input_schema`、`required` 和 `additionalProperties` 保持不变，因此不会损失工具参数约束。Claude Code 和 Claude Desktop 的原生 Anthropic 请求不会进入该清理分支，工具定义保持原样；JoyCode Responses、Chat 以及其他供应商也继续保留原有行为。
 
 ## 3. 三客户端协议链路
 
@@ -106,7 +106,7 @@ src-tauri/src/proxy/providers/joycode.rs
 
 ## 6. 风险与边界
 
-- 修改只在 `providerType=joycode` 且实际 wire API 为 Anthropic 时生效，避免扩大到其他模型或供应商。
+- 自适应思考和响应错误处理只在 `providerType=joycode` 且实际 wire API 为 Anthropic 时生效。工具 `strict` 清理进一步限定在 Responses→Anthropic 转换分支，Claude Code 和 Claude Desktop 原生 Anthropic 请求不受该清理影响。
 - 当前验证覆盖源码链路、模型目录、当前配置和定向测试。
 - 已安装的 `/Applications/CC Switch.app` 仍可能是旧二进制；严格运行时 E2E 需要构建、安装并重启当前分支版本后，分别从 Claude Code、Claude Desktop 和 Codex 发起真实请求。
 - 如果现场返回 HTTP 504，通常表示请求已到达 JoyCode/nginx 后发生上游超时；应结合 CC Switch 请求日志和 JoyCode 返回体区分协议错误与上游服务超时。

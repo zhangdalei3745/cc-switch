@@ -1590,7 +1590,7 @@ fn normalize_anthropic_thinking(body: &mut Value) {
     }
 }
 
-fn sanitize_anthropic_tools(body: &mut Value) {
+pub fn sanitize_codex_anthropic_tools(body: &mut Value) {
     let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
     };
@@ -1621,7 +1621,6 @@ pub fn decorate_body(body: &mut Value, wire_api: JoycodeWireApi) {
         // Normalize only JoyCode's Anthropic requests so other providers retain
         // their existing thinking semantics.
         normalize_anthropic_thinking(body);
-        sanitize_anthropic_tools(body);
     }
     body["client"] = Value::String(JOYCODE_CLIENT.to_string());
     body["clientVersion"] = Value::String(JOYCODE_CLIENT_VERSION.to_string());
@@ -2988,7 +2987,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_body_drops_unsupported_tool_strict() {
+    fn native_anthropic_body_preserves_tool_strict() {
         let mut body = json!({
             "model": "Claude-Opus-4.8-hq",
             "messages": [{"role": "user", "content": "hello"}],
@@ -3015,7 +3014,8 @@ mod tests {
         decorate_body(&mut body, JoycodeWireApi::Anthropic);
 
         let tools = body["tools"].as_array().expect("tools array");
-        assert!(tools.iter().all(|tool| tool.get("strict").is_none()));
+        assert_eq!(tools[0]["strict"], json!(true));
+        assert_eq!(tools[1]["strict"], json!(false));
         assert_eq!(
             tools[0]["input_schema"]["additionalProperties"],
             json!(false)
@@ -3048,6 +3048,7 @@ mod tests {
             .expect("Codex request should convert to Anthropic");
         assert_eq!(body["tools"][0]["strict"], json!(true));
 
+        sanitize_codex_anthropic_tools(&mut body);
         decorate_body(&mut body, JoycodeWireApi::Anthropic);
 
         assert!(body["tools"][0].get("strict").is_none());
