@@ -1528,6 +1528,68 @@ pub async fn validate_discovered_credential(
     Err(last_error.unwrap_or_else(|| "未找到可用的 JoyCode 认证地址".to_string()))
 }
 
+fn adaptive_effort_from_budget(budget_tokens: Option<u64>) -> &'static str {
+    match budget_tokens.unwrap_or(16_384) {
+        0..=2_048 => "low",
+        2_049..=8_192 => "medium",
+        8_193..=16_384 => "high",
+        _ => "max",
+    }
+}
+
+fn normalize_anthropic_thinking(body: &mut Value) {
+    let Some(model) = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+    else {
+        return;
+    };
+    if !crate::proxy::thinking_optimizer::uses_adaptive_thinking(&model) {
+        return;
+    }
+
+    let thinking_type = body
+        .pointer("/thinking/type")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    if !matches!(thinking_type.as_deref(), Some("enabled" | "adaptive")) {
+        return;
+    }
+
+    let budget_tokens = body
+        .pointer("/thinking/budget_tokens")
+        .and_then(Value::as_u64);
+    let was_legacy = thinking_type.as_deref() == Some("enabled");
+    body["thinking"] = json!({"type": "adaptive"});
+
+    let existing_effort = body
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let effort = existing_effort
+        .as_deref()
+        .unwrap_or_else(|| adaptive_effort_from_budget(budget_tokens));
+    if body
+        .get("output_config")
+        .and_then(Value::as_object)
+        .is_none()
+    {
+        body["output_config"] = json!({});
+    }
+    if body.pointer("/output_config/effort").is_none() {
+        body["output_config"]["effort"] = Value::String(effort.to_string());
+    }
+
+    if was_legacy || budget_tokens.is_some() {
+        log::debug!(
+            "[JoyCode] normalized adaptive thinking: model={model}, previous_type={}, effort={effort}, had_budget_tokens={}",
+            thinking_type.as_deref().unwrap_or("unknown"),
+            budget_tokens.is_some()
+        );
+    }
+}
+
 pub fn decorate_body(body: &mut Value, wire_api: JoycodeWireApi) {
     if wire_api == JoycodeWireApi::Anthropic {
         // Claude Code 2.1.235 sends the newer context-management beta field.
@@ -1537,6 +1599,11 @@ pub fn decorate_body(body: &mut Value, wire_api: JoycodeWireApi) {
         if let Some(object) = body.as_object_mut() {
             object.remove("context_management");
         }
+        // JoyCode exposes current Claude models through Anthropic Messages, but
+        // rejects the legacy fixed-budget form with an HTTP 200 business error.
+        // Normalize only JoyCode's Anthropic requests so other providers retain
+        // their existing thinking semantics.
+        normalize_anthropic_thinking(body);
     }
     body["client"] = Value::String(JOYCODE_CLIENT.to_string());
     body["clientVersion"] = Value::String(JOYCODE_CLIENT_VERSION.to_string());
@@ -1931,14 +1998,98 @@ fn normalize_joycode_sse_response(
     ProxyResponse::streamed(status, headers, normalized)
 }
 
+fn nested_error_message(error: &Value) -> Option<String> {
+    let cause = error.get("cause");
+    if let Some(cause) = cause.and_then(Value::as_object) {
+        if let Some(message) = cause.get("message").and_then(Value::as_str) {
+            return Some(message.to_string());
+        }
+    }
+    if let Some(cause) = cause.and_then(Value::as_str) {
+        if let Ok(value) = serde_json::from_str::<Value>(cause) {
+            if let Some(message) = value.get("message").and_then(Value::as_str) {
+                return Some(message.to_string());
+            }
+        }
+        if !cause.trim().is_empty() {
+            return Some(cause.to_string());
+        }
+    }
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+pub(crate) fn anthropic_business_error(payload: &Value) -> Option<ProxyError> {
+    let error = payload.get("error").filter(|error| !error.is_null())?;
+    let status = error
+        .get("code")
+        .and_then(|code| {
+            code.as_u64().or_else(|| {
+                code.as_str()
+                    .and_then(|code| code.trim().parse::<u64>().ok())
+            })
+        })
+        .filter(|status| (400..=599).contains(status))
+        .unwrap_or(502) as u16;
+    let message = nested_error_message(error)
+        .unwrap_or_else(|| "JoyCode Anthropic upstream returned a business error".to_string());
+    Some(ProxyError::UpstreamError {
+        status,
+        body: Some(message),
+    })
+}
+
+pub(crate) fn inspect_anthropic_sse_start(block: &str) -> Option<Result<(), ProxyError>> {
+    let data = block
+        .lines()
+        .filter_map(|line| crate::proxy::sse::strip_sse_field(line, "data"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.trim().is_empty() || data.trim() == "[DONE]" {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(&data).ok()?;
+    match anthropic_business_error(&payload) {
+        Some(error) => Some(Err(error)),
+        None => Some(Ok(())),
+    }
+}
+
 /// JoyCode's Anthropic adapter may wrap every already-serialized SSE line in
 /// another `data:` field. Unwrap that outer layer so Anthropic clients receive
-/// named `event:` fields instead of treating them as opaque data.
+/// named `event:` fields instead of treating them as opaque data. Buffered
+/// responses are also inspected because JoyCode reports some model failures as
+/// HTTP 200 JSON envelopes.
 pub async fn normalize_anthropic_response(
     response: ProxyResponse,
     is_streaming: bool,
 ) -> Result<ProxyResponse, ProxyError> {
-    if !is_streaming || !response.is_sse() {
+    if !is_streaming || response.is_json() {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
+        let decoded =
+            crate::proxy::content_encoding::get_content_encoding(&headers).and_then(|encoding| {
+                crate::proxy::content_encoding::decompress_body_with_limit(
+                    &encoding,
+                    &bytes,
+                    MAX_RESPONSE_BODY_BYTES,
+                )
+                .ok()
+                .flatten()
+            });
+        let inspect_bytes = decoded.as_deref().unwrap_or(&bytes);
+        if let Ok(payload) = serde_json::from_slice::<Value>(inspect_bytes) {
+            if let Some(error) = anthropic_business_error(&payload) {
+                return Err(error);
+            }
+        }
+        return Ok(ProxyResponse::buffered(status, headers, bytes));
+    }
+    if !response.is_sse() {
         return Ok(response);
     }
     Ok(normalize_joycode_sse_response(
@@ -2835,6 +2986,98 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_body_upgrades_legacy_thinking_for_adaptive_models() {
+        for model in [
+            "Claude-Opus-4.6-hq",
+            "Claude-Opus-4.7-hq",
+            "Claude-Opus-4.8-hq",
+            "Claude-Sonnet-4.6-hq",
+        ] {
+            let mut body = json!({
+                "model": model,
+                "thinking": {"type": "enabled", "budget_tokens": 4096}
+            });
+
+            decorate_body(&mut body, JoycodeWireApi::Anthropic);
+
+            assert_eq!(body["thinking"], json!({"type": "adaptive"}), "{model}");
+            assert_eq!(body["output_config"]["effort"], "medium", "{model}");
+            assert!(body["thinking"].get("budget_tokens").is_none(), "{model}");
+        }
+    }
+
+    #[test]
+    fn anthropic_body_preserves_existing_adaptive_effort() {
+        let mut body = json!({
+            "model": "Claude-Opus-4.8-hq",
+            "thinking": {"type": "adaptive", "budget_tokens": 4096},
+            "output_config": {"effort": "high", "format": {"type": "json_schema"}}
+        });
+
+        decorate_body(&mut body, JoycodeWireApi::Anthropic);
+
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn anthropic_body_leaves_legacy_model_thinking_unchanged() {
+        let mut body = json!({
+            "model": "claude-sonnet-4-5",
+            "thinking": {"type": "enabled", "budget_tokens": 4096}
+        });
+
+        decorate_body(&mut body, JoycodeWireApi::Anthropic);
+
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 4096);
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn anthropic_business_error_prefers_nested_cause_message() {
+        let payload = json!({
+            "error": {
+                "cause": "{\"message\":\"thinking.type.enabled is not supported; use adaptive\"}",
+                "code": 400,
+                "message": "模型服务调用失败",
+                "status": "FAILED_RESPONSE"
+            },
+            "result": null
+        });
+
+        let error = anthropic_business_error(&payload).expect("business error");
+        assert!(matches!(
+            error,
+            ProxyError::UpstreamError { status: 400, body: Some(message) }
+                if message == "thinking.type.enabled is not supported; use adaptive"
+        ));
+    }
+
+    #[test]
+    fn anthropic_sse_start_distinguishes_error_from_normal_event() {
+        let error_block = concat!(
+            "data: {\"error\":{\"cause\":\"{\\\"message\\\":\\\"bad thinking\\\"}\",",
+            "\"code\":400,\"message\":\"模型服务调用失败\"},\"result\":null}"
+        );
+        assert!(matches!(
+            inspect_anthropic_sse_start(error_block),
+            Some(Err(ProxyError::UpstreamError { status: 400, body: Some(message) }))
+                if message == "bad thinking"
+        ));
+
+        let normal_block = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}"
+        );
+        assert!(matches!(
+            inspect_anthropic_sse_start(normal_block),
+            Some(Ok(()))
+        ));
+    }
+
+    #[test]
     fn response_chain_removes_exact_replayed_prefix() {
         let previous_input =
             vec![json!({"role":"user","content":[{"type":"input_text","text":"hello"}]})];
@@ -2958,6 +3201,29 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("\"text\":\"hello\""));
         assert!(output.contains("\"totalTokenCount\":7"));
+    }
+
+    #[test]
+    fn unwraps_joycode_nested_anthropic_business_error_for_validation() {
+        let mut normalizer = JoycodeResponsesSseNormalizer::for_anthropic();
+        let input = concat!(
+            "data: data: {\"error\":{\"cause\":\"{\\\"message\\\":\\\"use adaptive\\\"}\",",
+            "\"code\":400,\"message\":\"模型服务调用失败\"},\"result\":null}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut output = normalizer.push_bytes(input.as_bytes());
+        output.extend(normalizer.finish());
+        let output = String::from_utf8(output).unwrap();
+        let mut parse_buffer = output;
+        let block =
+            crate::proxy::sse::take_sse_block(&mut parse_buffer).expect("normalized error event");
+
+        assert!(matches!(
+            inspect_anthropic_sse_start(&block),
+            Some(Err(ProxyError::UpstreamError { status: 400, body: Some(message) }))
+                if message == "use adaptive"
+        ));
+        assert!(!block.contains("data: data:"));
     }
 
     #[test]

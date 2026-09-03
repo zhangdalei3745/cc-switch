@@ -2680,6 +2680,11 @@ impl RequestForwarder {
                     request_is_streaming,
                 )
                 .await?;
+                if request_is_streaming && !response.is_json() {
+                    response = self
+                        .validate_joycode_anthropic_stream_start(response)
+                        .await?;
+                }
             }
             // Streaming requests normally return SSE. If a compatible gateway
             // explicitly returns JSON instead, buffer and validate it inside the retry
@@ -2973,6 +2978,88 @@ impl RequestForwarder {
             if replay_chunks.iter().map(Bytes::len).sum::<usize>() >= MAX_PRIME_BYTES {
                 log::warn!(
                     "[Claude/Responses] semantic stream priming exceeded {MAX_PRIME_BYTES} bytes; committing buffered stream"
+                );
+                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                return Ok(ProxyResponse::streamed(status, headers, replay));
+            }
+        }
+    }
+
+    async fn validate_joycode_anthropic_stream_start(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        const MAX_PRIME_BYTES: usize = 64 * 1024;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mut stream = Box::pin(response.bytes_stream());
+        let mut replay_chunks: Vec<Bytes> = Vec::new();
+        let mut parse_buffer = String::new();
+        let mut utf8_remainder = Vec::new();
+
+        loop {
+            let next = if self.streaming_first_byte_timeout.is_zero() {
+                stream.next().await
+            } else {
+                tokio::time::timeout(self.streaming_first_byte_timeout, stream.next())
+                    .await
+                    .map_err(|_| {
+                        ProxyError::Timeout(format!(
+                            "JoyCode Anthropic stream produced no event within {}s",
+                            self.streaming_first_byte_timeout.as_secs()
+                        ))
+                    })?
+            };
+
+            let Some(chunk) = next else {
+                if let Ok(payload) = serde_json::from_str::<Value>(parse_buffer.trim()) {
+                    if let Some(error) =
+                        super::providers::joycode::anthropic_business_error(&payload)
+                    {
+                        return Err(error);
+                    }
+                }
+                if !parse_buffer.trim().is_empty() {
+                    if let Some(outcome) =
+                        super::providers::joycode::inspect_anthropic_sse_start(&parse_buffer)
+                    {
+                        outcome?;
+                    }
+                }
+                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok));
+                return Ok(ProxyResponse::streamed(status, headers, replay));
+            };
+            let chunk = chunk.map_err(|error| {
+                ProxyError::ForwardFailed(format!(
+                    "Failed while validating JoyCode Anthropic stream start: {error}"
+                ))
+            })?;
+            crate::proxy::sse::append_utf8_safe(&mut parse_buffer, &mut utf8_remainder, &chunk);
+            replay_chunks.push(chunk);
+
+            if let Ok(payload) = serde_json::from_str::<Value>(parse_buffer.trim()) {
+                if let Some(error) = super::providers::joycode::anthropic_business_error(&payload) {
+                    return Err(error);
+                }
+                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                return Ok(ProxyResponse::streamed(status, headers, replay));
+            }
+
+            while let Some(block) = crate::proxy::sse::take_sse_block(&mut parse_buffer) {
+                if let Some(outcome) =
+                    super::providers::joycode::inspect_anthropic_sse_start(&block)
+                {
+                    outcome?;
+                    let replay =
+                        futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                    return Ok(ProxyResponse::streamed(status, headers, replay));
+                }
+            }
+
+            if replay_chunks.iter().map(Bytes::len).sum::<usize>() >= MAX_PRIME_BYTES {
+                log::warn!(
+                    "[JoyCode] Anthropic stream priming exceeded {MAX_PRIME_BYTES} bytes; committing buffered stream"
                 );
                 let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
                 return Ok(ProxyResponse::streamed(status, headers, replay));
@@ -4467,6 +4554,63 @@ mod tests {
                 .get(http::header::USER_AGENT)
                 .and_then(|value| value.to_str().ok()),
             Some("copilot")
+        );
+    }
+
+    #[tokio::test]
+    async fn joycode_anthropic_stream_start_surfaces_business_error() {
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::once(async {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    br#"data: {"error":{"cause":"{\"message\":\"use adaptive thinking\"}","code":400,"message":"model failed"},"result":null}
+
+"#,
+                ))
+            }),
+        );
+
+        let error = match forwarder
+            .validate_joycode_anthropic_stream_start(response)
+            .await
+        {
+            Ok(_) => panic!("business error should fail before the stream is committed"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ProxyError::UpstreamError { status: 400, body: Some(message) }
+                if message == "use adaptive thinking"
+        ));
+    }
+
+    #[tokio::test]
+    async fn joycode_anthropic_stream_start_replays_normal_event() {
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let body = Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n\n",
+        );
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::once({
+                let body = body.clone();
+                async move { Ok::<Bytes, std::io::Error>(body) }
+            }),
+        );
+
+        let validated = forwarder
+            .validate_joycode_anthropic_stream_start(response)
+            .await
+            .expect("normal Anthropic event should be accepted");
+        assert_eq!(
+            validated
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
+            body
         );
     }
 
