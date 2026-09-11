@@ -366,6 +366,10 @@ impl CodexLiveStateSnapshot {
 pub enum CodexCatalogToolProfile {
     ProxyChat,
     NativeResponses,
+    /// JoyCode internal uses the conservative native template, but the two verified
+    /// Responses models get freeform apply_patch and default managed-edit guidance. Other
+    /// JoyCode models retain their existing conservative catalog entries.
+    JoycodeResponses,
     /// Codex talks (through cc-switch's proxy) to a native Anthropic Messages
     /// gateway. Like `NativeResponses` it must suppress Codex's freeform custom
     /// tools — the Responses→Anthropic transform keeps only `function` tools.
@@ -374,6 +378,11 @@ pub enum CodexCatalogToolProfile {
     /// `prepare_codex_config_text_with_model_catalog`.
     Anthropic,
 }
+
+// A tool declaration alone is insufficient: Sol may otherwise edit via shell
+// redirection, bypassing Codex's managed fileChange/TurnDiff tracking. Apply this
+// default harness hint only to the two verified models, never over a user preamble.
+const JOYCODE_RESPONSES_EDIT_INSTRUCTIONS: &str = "Use apply_patch for manual file edits instead of writing files through shell commands. Keep shell commands for reading files, running tests and builds, and producing generated artifacts.";
 
 impl CodexCatalogToolProfile {
     /// Pick the catalog tool profile from a provider's `apiFormat` meta value.
@@ -1424,9 +1433,10 @@ fn codex_catalog_model_entry(
     );
 
     if profile != CodexCatalogToolProfile::ProxyChat {
-        // Native `/responses` and Anthropic gateways reject / drop Codex's freeform
-        // `apply_patch` (type=="custom") tool. Strip any key that would make Codex
-        // emit a custom/freeform tool, and rely on shell_type="shell_command" for
+        // Keep native / Anthropic catalogs conservative by default. The verified
+        // JoyCode exceptions below restore only apply_patch after this cleanup.
+        // Strip keys that would make Codex emit custom/freeform tools and rely
+        // on shell_type="shell_command" for
         // edits. Defensive even though the native template is already clean
         // (guards against template drift / an accidental gpt-5.5 clone).
         //
@@ -1454,6 +1464,27 @@ fn codex_catalog_model_entry(
         }
         if let Some(parallel) = spec.supports_parallel_tool_calls {
             entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
+        }
+    }
+
+    // Only these exact JoyCode model IDs have passed native custom-tool/SSE
+    // and tool-result replay probes. Do not infer support from a GPT prefix or
+    // enable it provider-wide: the same catalog also contains Chat/Messages rows.
+    if profile == CodexCatalogToolProfile::JoycodeResponses
+        && matches!(spec.model.as_str(), "GPT-5.6 Sol" | "GPT-6 Astra")
+    {
+        entry_obj.insert("apply_patch_tool_type".to_string(), json!("freeform"));
+        if spec
+            .base_instructions
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+        {
+            let base = entry_obj
+                .get("base_instructions")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let instructions = format!("{base}\n\n{JOYCODE_RESPONSES_EDIT_INSTRUCTIONS}");
+            entry_obj.insert("base_instructions".to_string(), json!(instructions));
         }
     }
 
@@ -2117,7 +2148,9 @@ fn codex_model_catalog_from_settings(
     // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
     // entry so the proxy can rewrite custom<->function tools as before.
     let template = match profile {
-        CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::Anthropic => {
+        CodexCatalogToolProfile::NativeResponses
+        | CodexCatalogToolProfile::JoycodeResponses
+        | CodexCatalogToolProfile::Anthropic => {
             load_codex_native_responses_template()
         }
         CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
@@ -2225,7 +2258,8 @@ pub fn prepare_codex_config_text_with_model_catalog(
             // The Responses→Anthropic transform silently drops the Codex web_search
             // hosted tool, so always disable it here rather than present a dead tool.
             CodexCatalogToolProfile::Anthropic => true,
-            CodexCatalogToolProfile::NativeResponses => {
+            CodexCatalogToolProfile::NativeResponses
+            | CodexCatalogToolProfile::JoycodeResponses => {
                 codex_native_gateway_rejects_web_search(&config_text)
             }
             CodexCatalogToolProfile::ProxyChat => false,
@@ -6743,6 +6777,97 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
+    fn joycode_responses_catalog_only_enables_verified_models_apply_patch() {
+        let model_ids = [
+            "GPT-5.6 Sol",
+            "GPT-6 Astra",
+            "Claude-Opus-4.8-hq",
+            "Claude-Opus-5-hq",
+            "DeepSeek-V4-Pro",
+            "Doubao-Seed-2.0-pro",
+            "GLM-5.2-jcloud",
+            "GLM-5.3",
+            "JoyAI-Code-1.5",
+            "JoyCode-Base-V3",
+            "Kimi-K3",
+            "Kimi-K3-jcloud",
+            "MiniMax-M3",
+            "GPT-6 Astra-preview",
+            "GPT-5.6 Sol-other",
+            "gpt-6-astra",
+            "unknown",
+        ];
+        let settings = json!({"modelCatalog": {"models": model_ids.iter()
+            .map(|model| json!({"model": model, "contextWindow": 200_000}))
+            .collect::<Vec<_>>()}});
+        let native = codex_model_catalog_from_settings(
+            &settings,
+            "",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .unwrap()
+        .unwrap();
+        let joycode = codex_model_catalog_from_settings(
+            &settings,
+            "",
+            CodexCatalogToolProfile::JoycodeResponses,
+        )
+        .unwrap()
+        .unwrap();
+        for (index, model) in model_ids.iter().enumerate() {
+            let mut expected = native["models"][index].clone();
+            if index < 2 {
+                expected["apply_patch_tool_type"] = json!("freeform");
+                expected["base_instructions"] = json!(format!(
+                    "{}\n\n{JOYCODE_RESPONSES_EDIT_INSTRUCTIONS}",
+                    expected["base_instructions"].as_str().unwrap()
+                ));
+            }
+            assert_eq!(
+                joycode["models"][index], expected,
+                "unexpected catalog change for {model}"
+            );
+            assert_eq!(joycode["models"][index]["shell_type"], "shell_command");
+            assert_eq!(joycode["models"][index]["supports_search_tool"], false);
+            assert_eq!(
+                joycode["models"][index]["supports_parallel_tool_calls"],
+                false
+            );
+            assert!(native["models"][index]
+                .get("apply_patch_tool_type")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn joycode_responses_keeps_native_row_overrides_and_neutral_instructions() {
+        let settings = json!({"modelCatalog": {"models": [{
+            "model": "GPT-6 Astra", "displayName": "Custom label",
+            "contextWindow": 123_456, "supportsParallelToolCalls": true,
+            "inputModalities": ["text"], "baseInstructions": "User preamble",
+            "reasoningLevels": ["none", "high"], "defaultReasoningLevel": "none"
+        }]}});
+        let mut native = codex_model_catalog_from_settings(
+            &settings,
+            "",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .unwrap()
+        .unwrap();
+        let joycode = codex_model_catalog_from_settings(
+            &settings,
+            "",
+            CodexCatalogToolProfile::JoycodeResponses,
+        )
+        .unwrap()
+        .unwrap();
+        native["models"][0]["apply_patch_tool_type"] = json!("freeform");
+        assert_eq!(joycode, native);
+        assert_eq!(joycode["models"][0]["base_instructions"], "User preamble");
+        assert!(joycode["models"][0].get("model_messages").is_none());
+    }
+
+    #[test]
     fn catalog_infers_image_input_independently_of_tool_profile() {
         // Start from a deliberately text-only template to prove that every
         // profile overwrites template defaults with shared capability logic.
@@ -6806,6 +6931,7 @@ base_url = "https://production.api/v1"
         for profile in [
             CodexCatalogToolProfile::ProxyChat,
             CodexCatalogToolProfile::NativeResponses,
+            CodexCatalogToolProfile::JoycodeResponses,
             CodexCatalogToolProfile::Anthropic,
         ] {
             let catalog = codex_model_catalog_from_specs(&specs, &template, profile, 128_000);
