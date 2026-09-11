@@ -3735,6 +3735,62 @@ mod tests {
     }
 
     #[test]
+    fn joycode_responses_nested_sse_preserves_custom_patch_and_result_replay() {
+        let patch =
+            "*** Begin Patch\n*** Update File: probe.txt\n@@\n-BEFORE\n+修复完成\n*** End Patch";
+        let item = json!({
+            "id": "ctc_probe", "type": "custom_tool_call", "status": "completed",
+            "call_id": "call_probe", "name": "apply_patch", "input": patch
+        });
+        let events = vec![
+            json!({"type": "response.output_item.added", "output_index": 0,
+                "item": {"id": "ctc_probe", "type": "custom_tool_call", "status": "in_progress",
+                    "call_id": "call_probe", "name": "apply_patch", "input": ""}}),
+            json!({"type": "response.custom_tool_call_input.delta", "output_index": 0,
+                "item_id": "ctc_probe", "delta": patch}),
+            json!({"type": "response.custom_tool_call_input.done", "output_index": 0,
+                "item_id": "ctc_probe", "input": patch}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
+            json!({"type": "response.completed", "response": {
+                "id": "resp_probe", "status": "completed", "output": [item]}}),
+        ];
+        let nested: String = events
+            .iter()
+            .map(|event| {
+                format!(
+                    "data: event: {}\n\ndata: data: {}\n\n",
+                    event["type"].as_str().unwrap(),
+                    event
+                )
+            })
+            .collect();
+        // Split at every byte, including within UTF-8 characters, just as HTTP
+        // chunk boundaries may do. No custom event, call id or patch may change.
+        let mut normalizer = JoycodeResponsesSseNormalizer::default();
+        let mut normalized = Vec::new();
+        for byte in nested.as_bytes() {
+            normalized.extend(normalizer.push_bytes(&[*byte]));
+        }
+        normalized.extend(normalizer.finish());
+        let text = String::from_utf8(normalized).unwrap();
+        assert!(!text.contains("data: event:"));
+        let parsed: Vec<Value> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        assert_eq!(parsed, events);
+
+        let request = vec![json!({"role": "user", "content": "Edit probe.txt"})];
+        let result = json!({"type": "custom_tool_call_output", "call_id": "call_probe", "output": "Success"});
+        let replay = vec![request[0].clone(), item.clone(), result.clone()];
+        assert_eq!(
+            incremental_input(&replay, &request, &[item]),
+            Some(vec![result])
+        );
+    }
+
+    #[test]
     fn unwraps_joycode_nested_anthropic_sse_and_drops_done() {
         let mut normalizer = JoycodeResponsesSseNormalizer::for_anthropic();
         let input = concat!(

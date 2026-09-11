@@ -352,6 +352,20 @@ pub fn resolve_codex_catalog_tool_profile(
     if provider.is_xai_oauth() {
         return CodexCatalogToolProfile::NativeResponses;
     }
+    // Keep this opt-in narrower than routing: only the existing JoyCode native
+    // catalog gains the two verified per-model apply_patch declarations. Do not
+    // change explicitly configured Anthropic/Chat providers or same-named models
+    // at another supplier. The external signed gateway is not yet verified.
+    if super::joycode::is_joycode_provider(provider)
+        && matches!(
+            super::joycode::provider_network(provider),
+            Ok(super::joycode::JoycodeNetwork::Internal)
+        )
+        && provider.meta.as_ref().and_then(|m| m.api_format.as_deref()) == Some("openai_responses")
+        && !codex_provider_uses_anthropic(provider)
+    {
+        return CodexCatalogToolProfile::JoycodeResponses;
+    }
     if codex_provider_uses_anthropic(provider) {
         return CodexCatalogToolProfile::Anthropic;
     }
@@ -1456,6 +1470,64 @@ wire_api = "anthropic"
         assert_eq!(
             resolve_codex_catalog_tool_profile(&chat),
             CodexCatalogToolProfile::ProxyChat
+        );
+    }
+
+    #[test]
+    fn joycode_responses_catalog_profile_is_provider_scoped() {
+        use crate::codex_config::CodexCatalogToolProfile;
+        let mut provider = create_provider(json!({"model": "GPT-6 Astra"}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("joycode".to_string()),
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_codex_catalog_tool_profile(&provider),
+            CodexCatalogToolProfile::JoycodeResponses
+        );
+        for network in ["external", "internet", "invalid"] {
+            provider.meta.as_mut().unwrap().joycode_network = Some(network.to_string());
+            assert_eq!(
+                resolve_codex_catalog_tool_profile(&provider),
+                CodexCatalogToolProfile::NativeResponses
+            );
+        }
+        provider.meta.as_mut().unwrap().joycode_network = Some("internal".to_string());
+        // Editing the selected model must not widen the whitelist: per-row gating
+        // happens during catalog generation, not once for the whole provider.
+        provider.settings_config["model"] = json!("Claude-Opus-5-hq");
+        assert_eq!(
+            resolve_codex_catalog_tool_profile(&provider),
+            CodexCatalogToolProfile::JoycodeResponses
+        );
+        provider.meta.as_mut().unwrap().provider_type = None;
+        assert_eq!(
+            resolve_codex_catalog_tool_profile(&provider),
+            CodexCatalogToolProfile::NativeResponses
+        );
+        provider.meta.as_mut().unwrap().provider_type = Some("joycode".to_string());
+        provider.meta.as_mut().unwrap().api_format = Some("openai_chat".to_string());
+        assert_eq!(
+            resolve_codex_catalog_tool_profile(&provider),
+            CodexCatalogToolProfile::ProxyChat
+        );
+        provider.meta.as_mut().unwrap().api_format = Some("anthropic".to_string());
+        assert_eq!(
+            resolve_codex_catalog_tool_profile(&provider),
+            CodexCatalogToolProfile::Anthropic
+        );
+        provider.meta.as_mut().unwrap().api_format = Some("openai_responses".to_string());
+        provider.settings_config["apiFormat"] = json!("anthropic");
+        // Explicit meta remains authoritative, matching the existing router.
+        assert_eq!(
+            resolve_codex_catalog_tool_profile(&provider),
+            CodexCatalogToolProfile::JoycodeResponses
+        );
+        provider.meta.as_mut().unwrap().api_format = None;
+        assert_eq!(
+            resolve_codex_catalog_tool_profile(&provider),
+            CodexCatalogToolProfile::Anthropic
         );
     }
 
