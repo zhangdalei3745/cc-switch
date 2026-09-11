@@ -361,8 +361,7 @@ pub fn resolve_codex_catalog_tool_profile(
             super::joycode::provider_network(provider),
             Ok(super::joycode::JoycodeNetwork::Internal)
         )
-        && provider.meta.as_ref().and_then(|m| m.api_format.as_deref())
-            == Some("openai_responses")
+        && provider.meta.as_ref().and_then(|m| m.api_format.as_deref()) == Some("openai_responses")
         && !codex_provider_uses_anthropic(provider)
     {
         return CodexCatalogToolProfile::JoycodeResponses;

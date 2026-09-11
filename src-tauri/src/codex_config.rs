@@ -2150,9 +2150,7 @@ fn codex_model_catalog_from_settings(
     let template = match profile {
         CodexCatalogToolProfile::NativeResponses
         | CodexCatalogToolProfile::JoycodeResponses
-        | CodexCatalogToolProfile::Anthropic => {
-            load_codex_native_responses_template()
-        }
+        | CodexCatalogToolProfile::Anthropic => load_codex_native_responses_template(),
         CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
     };
     Ok(Some(codex_model_catalog_from_specs(
