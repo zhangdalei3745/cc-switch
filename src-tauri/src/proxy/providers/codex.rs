@@ -206,8 +206,8 @@ pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint
     ) && codex_provider_uses_anthropic(provider)
 }
 
-/// Whether a native-Responses Codex upstream needs Codex `namespace`/plugin
-/// tool declarations flattened before forwarding, plus xAI schema sanitization.
+/// Whether an xAI native-Responses upstream needs its namespace response restore
+/// plus provider-specific request schema sanitization.
 ///
 /// Codex 0.142+ emits ChatGPT-backend-private `{"type":"namespace",…}` tool
 /// shapes that strict third-party Responses gateways reject with
@@ -218,8 +218,28 @@ pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint
 ///
 /// Covers managed xAI OAuth *and* API-key providers whose live upstream is
 /// `api.x.ai` with `wire_api = "responses"`. See farion1231/cc-switch#6815.
-pub fn provider_needs_responses_namespace_flatten(provider: &Provider) -> bool {
+pub fn provider_needs_xai_native_responses_rewrite(provider: &Provider) -> bool {
     provider.is_xai_oauth() || provider_is_xai_native_responses(provider)
+}
+
+/// Whether a native-Responses Codex upstream needs Codex `namespace` tool
+/// declarations flattened before forwarding.
+///
+/// xAI rejects the private shape outright. JoyCode currently accepts the HTTP
+/// request but its model runtime returns `模型服务调用失败` whenever a
+/// `namespace` declaration is present (even with no nested tools). Keep this
+/// gate protocol-specific so JoyCode Chat/Anthropic routing is untouched.
+pub fn provider_needs_responses_namespace_flatten(provider: &Provider) -> bool {
+    provider_needs_xai_native_responses_rewrite(provider)
+        || (super::joycode::is_joycode_provider(provider)
+            && extract_codex_wire_api_from_toml(
+                provider
+                    .settings_config
+                    .get("config")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            )
+            .is_some_and(|wire_api| wire_api.eq_ignore_ascii_case("responses")))
 }
 
 /// True when this Codex provider talks native Responses to first-party xAI
@@ -2152,7 +2172,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn namespace_flatten_gate_fires_for_xai_oauth_and_api_xai_responses() {
+    fn namespace_flatten_gate_fires_for_xai_and_joycode_responses() {
         let mut xai = create_provider(json!({ "auth": {}, "config": "" }));
         xai.meta = Some(crate::provider::ProviderMeta {
             provider_type: Some("xai_oauth".to_string()),

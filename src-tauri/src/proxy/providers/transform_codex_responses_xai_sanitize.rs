@@ -983,9 +983,12 @@ fn whole_float_to_json_int(number: &Number) -> Option<Number> {
 /// Wrap a native Responses SSE byte stream: restore flattened namespace names
 /// and rewrite completed function-call argument JSON. Delta fragments that are
 /// not complete JSON pass through unchanged.
-pub(crate) fn create_xai_native_responses_sse_stream<E>(
+/// Wrap a native Responses SSE byte stream: restore flattened namespace names;
+/// optionally rewrite completed function-call argument JSON for xAI.
+pub(crate) fn create_native_responses_namespace_restore_sse_stream<E>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
     restore_map: HashMap<String, NamespacedName>,
+    normalize_integer_arguments: bool,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
 where
     E: std::error::Error + Send + 'static,
@@ -1004,7 +1007,11 @@ where
                         if block.trim().is_empty() {
                             continue;
                         }
-                        yield Ok(rewrite_xai_native_sse_block(&block, &restore_map));
+                        yield Ok(rewrite_native_sse_block(
+                            &block,
+                            &restore_map,
+                            normalize_integer_arguments,
+                        ));
                     }
                 }
                 Err(e) => {
@@ -1019,14 +1026,19 @@ where
         }
         let tail = std::mem::take(&mut buffer);
         if !tail.trim().is_empty() {
-            yield Ok(rewrite_xai_native_sse_block(&tail, &restore_map));
+            yield Ok(rewrite_native_sse_block(
+                &tail,
+                &restore_map,
+                normalize_integer_arguments,
+            ));
         }
     }
 }
 
-fn rewrite_xai_native_sse_block(
+fn rewrite_native_sse_block(
     block: &str,
     restore_map: &HashMap<String, NamespacedName>,
+    normalize_integer_arguments: bool,
 ) -> Bytes {
     let mut event_name: Option<&str> = None;
     let mut data_parts: Vec<&str> = Vec::new();
@@ -1054,7 +1066,9 @@ fn rewrite_xai_native_sse_block(
     };
 
     let mut changed = restore_sse_event_namespaces(&mut event, restore_map);
-    changed |= normalize_xai_function_call_integer_arguments(&mut event);
+    if normalize_integer_arguments {
+        changed |= normalize_xai_function_call_integer_arguments(&mut event);
+    }
     if !changed {
         return Bytes::from(format!("{block}\n\n"));
     }
@@ -1514,7 +1528,7 @@ mod tests {
             "event: response.function_call_arguments.done\n",
             r#"data: {"type":"response.function_call_arguments.done","arguments":"{\"session_id\":92116.0,\"yield_time_ms\":120000.0}"}"#,
         );
-        let rewritten = rewrite_xai_native_sse_block(done, &HashMap::new());
+        let rewritten = rewrite_native_sse_block(done, &HashMap::new(), true);
         let rewritten = String::from_utf8(rewritten.to_vec()).unwrap();
         let data = rewritten
             .lines()
@@ -1531,11 +1545,50 @@ mod tests {
             "event: response.function_call_arguments.delta\n",
             r#"data: {"type":"response.function_call_arguments.delta","delta":"{\"session_id\":92116.0"}"#,
         );
-        let passed = rewrite_xai_native_sse_block(delta, &HashMap::new());
+        let passed = rewrite_native_sse_block(delta, &HashMap::new(), true);
         assert_eq!(
             String::from_utf8(passed.to_vec()).unwrap(),
             format!("{delta}\n\n")
         );
+    }
+
+    #[test]
+    fn joycode_sse_restore_keeps_whole_float_arguments() {
+        let mut restore_map = HashMap::new();
+        restore_map.insert(
+            "mcp__server__tool".to_string(),
+            NamespacedName {
+                namespace: "mcp__server".to_string(),
+                name: "tool".to_string(),
+            },
+        );
+        let event = json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "name": "mcp__server__tool",
+                "arguments": r#"{"session_id":92116.0,"yield_time_ms":120000.0}"#,
+            }
+        });
+        let block = format!(
+            "event: response.output_item.added\ndata: {}",
+            serde_json::to_string(&event).unwrap()
+        );
+        let restored = rewrite_native_sse_block(&block, &restore_map, false);
+        let restored = String::from_utf8(restored.to_vec()).unwrap();
+        let data = restored
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let event: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(event["item"]["name"], "tool");
+        assert_eq!(event["item"]["namespace"], "mcp__server");
+        let arguments: Value =
+            serde_json::from_str(event["item"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["session_id"].as_f64(), Some(92116.0));
+        assert!(arguments["session_id"].as_i64().is_none());
+        assert_eq!(arguments["yield_time_ms"].as_f64(), Some(120000.0));
+        assert!(arguments["yield_time_ms"].as_i64().is_none());
     }
 
     #[test]

@@ -1124,16 +1124,27 @@ async fn handle_responses_for_app(
         .await;
     }
 
-    // Native Responses passthrough to a strict gateway (xAI): restore flattened
-    // function-call names *and* rewrite whole-float tool arguments. The integer
-    // rewrite must run even when the request had no namespace tools.
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider) {
-        return handle_codex_xai_native_responses_rewrite(
+    // xAI restores flattened function-call names and additionally rewrites
+    // whole-float tool arguments. JoyCode only needs namespace-name restore.
+    if super::providers::provider_needs_xai_native_responses_rewrite(&ctx.provider) {
+        return handle_codex_native_responses_namespace_restore(
             response,
             &ctx,
             &state,
             connection_guard,
             namespace_restore_map,
+            true,
+        )
+        .await;
+    }
+    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider) {
+        return handle_codex_native_responses_namespace_restore(
+            response,
+            &ctx,
+            &state,
+            connection_guard,
+            namespace_restore_map,
+            false,
         )
         .await;
     }
@@ -1319,13 +1330,27 @@ async fn handle_responses_compact_for_app(
         .await;
     }
 
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider) {
-        return handle_codex_xai_native_responses_rewrite(
+    // xAI restores flattened function-call names and additionally rewrites
+    // whole-float tool arguments. JoyCode only needs namespace-name restore.
+    if super::providers::provider_needs_xai_native_responses_rewrite(&ctx.provider) {
+        return handle_codex_native_responses_namespace_restore(
             response,
             &ctx,
             &state,
             connection_guard,
             namespace_restore_map,
+            true,
+        )
+        .await;
+    }
+    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider) {
+        return handle_codex_native_responses_namespace_restore(
+            response,
+            &ctx,
+            &state,
+            connection_guard,
+            namespace_restore_map,
+            false,
         )
         .await;
     }
@@ -1340,11 +1365,12 @@ async fn handle_responses_compact_for_app(
     .await
 }
 
-/// Response handler for the native Responses passthrough to xAI: restore
-/// flattened `function_call` names and rewrite whole-float tool arguments.
+/// Restore flattened `function_call` names for a native Responses upstream.
+/// xAI additionally rewrites whole-float tool arguments; JoyCode must not.
 /// Error bodies pass through unchanged. Usage is collected exactly as
 /// `process_response` would (same `CODEX_PARSER_CONFIG`).
-async fn handle_codex_xai_native_responses_rewrite(
+#[allow(clippy::too_many_arguments)]
+async fn handle_codex_native_responses_namespace_restore(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
     state: &ProxyState,
@@ -1353,6 +1379,7 @@ async fn handle_codex_xai_native_responses_rewrite(
         String,
         transform_codex_responses_namespace::NamespacedName,
     >,
+    normalize_integer_arguments: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
 
@@ -1374,9 +1401,10 @@ async fn handle_codex_xai_native_responses_rewrite(
         }
 
         let restore_stream =
-            transform_codex_responses_xai_sanitize::create_xai_native_responses_sse_stream(
+            transform_codex_responses_xai_sanitize::create_native_responses_namespace_restore_sse_stream(
                 response.bytes_stream(),
                 restore_map,
+                normalize_integer_arguments,
             );
         let usage_collector =
             create_usage_collector(ctx, state, status.as_u16(), &CODEX_PARSER_CONFIG);
@@ -1417,9 +1445,11 @@ async fn handle_codex_xai_native_responses_rewrite(
                 &mut value,
                 &restore_map,
             );
-            transform_codex_responses_xai_sanitize::normalize_xai_function_call_integer_arguments(
-                &mut value,
-            );
+            if normalize_integer_arguments {
+                transform_codex_responses_xai_sanitize::normalize_xai_function_call_integer_arguments(
+                    &mut value,
+                );
+            }
             if let Some(usage) =
                 TokenUsage::from_codex_response_auto(&value).filter(TokenUsage::has_billable_tokens)
             {
