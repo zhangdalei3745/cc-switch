@@ -191,6 +191,53 @@ pub struct RequestForwarder {
 }
 
 impl RequestForwarder {
+    /// Recover only Codex -> JoyCode -> Anthropic signature rejections. The
+    /// general Claude rectifier operates on Messages, not Responses input.
+    fn joycode_codex_signature_retry_body(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        route: Option<&super::providers::joycode::JoycodeModel>,
+        error: &ProxyError,
+        body: &Value,
+    ) -> Option<Value> {
+        let route = route?;
+        if !matches!(app_type, AppType::Codex)
+            || !super::providers::joycode::is_joycode_provider(provider)
+            || route.wire_api != super::providers::joycode::JoycodeWireApi::Anthropic
+            // Do not turn a signature error into an invalid unsigned tool turn
+            // for models that cannot disable thinking.
+            || super::thinking_optimizer::thinking_cannot_be_disabled(&route.id)
+        {
+            return None;
+        }
+        let ProxyError::UpstreamError {
+            status: 400,
+            body: Some(message),
+        } = error
+        else {
+            return None;
+        };
+        // The legacy detector also accepts generic "invalid request" errors.
+        // This new path must only discard replay after an explicit rejection
+        // of the thinking signature, and must honor both rectifier switches.
+        let lower = message.to_ascii_lowercase();
+        if !["invalid", "signature", "thinking", "block"]
+            .iter()
+            .all(|word| lower.contains(word))
+            || !should_rectify_thinking_signature(Some(message), &self.rectifier_config)
+        {
+            return None;
+        }
+        let mut retry_body = body.clone();
+        let removed = super::providers::transform_codex_anthropic::remove_anthropic_thinking_replay(
+            &mut retry_body,
+        );
+        // Removing every bridge envelope makes this retry idempotent: a second
+        // rejection has nothing to remove and is returned without retrying.
+        (removed > 0).then_some(retry_body)
+    }
+
     /// 预防式 media 降级：发送前对 text-only 模型把图片块替换为标记。
     ///
     /// 受 `enabled && request_media_fallback` 管辖；其中"启发式模型名单预测"
@@ -2829,10 +2876,34 @@ impl RequestForwarder {
                 .await;
             }
 
-            Err(ProxyError::UpstreamError {
+            let error = ProxyError::UpstreamError {
                 status: status_code,
                 body: body_text,
-            })
+            };
+            if let Some(retry_body) = self.joycode_codex_signature_retry_body(
+                app_type,
+                provider,
+                joycode_model.as_ref(),
+                &error,
+                body,
+            ) {
+                log::info!(
+                    "[JoyCode] Codex thinking signature rejected; retrying once without signed thinking replay"
+                );
+                return Box::pin(self.forward_inner(
+                    app_type,
+                    method,
+                    provider,
+                    endpoint,
+                    &retry_body,
+                    headers,
+                    extensions,
+                    adapter,
+                    joycode_runtime_retried,
+                ))
+                .await;
+            }
+            Err(error)
         }
     }
 
@@ -4337,6 +4408,308 @@ mod tests {
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
+        }
+    }
+
+    fn joycode_thinking_route() -> super::super::providers::joycode::JoycodeModel {
+        super::super::providers::joycode::JoycodeModel {
+            id: "Claude-Opus-4.8-hq".to_string(),
+            owned_by: "anthropic".to_string(),
+            wire_api: super::super::providers::joycode::JoycodeWireApi::Anthropic,
+            context_window: None,
+            max_output_tokens: None,
+        }
+    }
+
+    fn thinking_signature_error() -> ProxyError {
+        ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block"}}"#
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn joycode_signed_tool_request() -> Value {
+        let encoded =
+            super::super::providers::transform_codex_anthropic::encode_anthropic_thinking_block(
+                &json!({"type":"thinking", "thinking":"check the file", "signature":"stale-signature"}),
+            )
+            .unwrap();
+        json!({
+            "model": "Claude-Opus-4.8-hq",
+            "stream": true,
+            "reasoning": {"effort": "high"},
+            "input": [
+                {"role":"user", "content":"Read the file"},
+                {"type":"reasoning", "id":"rs_1", "summary":[], "encrypted_content":encoded},
+                {"type":"function_call", "call_id":"call_1", "name":"Read", "arguments":"{\"path\":\"/tmp/a\"}"},
+                {"type":"function_call_output", "call_id":"call_1", "output":"file contents"}
+            ],
+            "tools": [{"type":"function", "name":"Read", "parameters":{"type":"object"}}]
+        })
+    }
+
+    #[test]
+    fn joycode_codex_signature_retry_preserves_tool_history_and_is_bounded() {
+        use super::super::providers::transform_codex_anthropic::responses_request_to_anthropic;
+
+        let fwd = test_forwarder(Duration::from_secs(10), Duration::from_secs(10));
+        let provider = test_provider_with_type(Some("joycode"));
+        let route = joycode_thinking_route();
+        for streaming in [false, true] {
+            let mut body = joycode_signed_tool_request();
+            body["stream"] = json!(streaming);
+            let original = body.clone();
+            let first = responses_request_to_anthropic(body.clone(), 8192).unwrap();
+            assert_eq!(
+                first["messages"][1]["content"][0]["signature"],
+                "stale-signature"
+            );
+            assert_eq!(first["thinking"]["type"], "adaptive");
+
+            let retry = fwd
+                .joycode_codex_signature_retry_body(
+                    &AppType::Codex,
+                    &provider,
+                    Some(&route),
+                    &thinking_signature_error(),
+                    &body,
+                )
+                .expect("recover explicit signature rejection");
+            assert_eq!(body, original, "do not modify the caller's history");
+            let mut expected = original.clone();
+            expected["input"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("encrypted_content");
+            assert_eq!(
+                retry, expected,
+                "only bridge-owned encrypted_content changes"
+            );
+            let second = responses_request_to_anthropic(retry.clone(), 8192).unwrap();
+            assert_eq!(second["thinking"]["type"], "disabled");
+            assert_eq!(second["stream"], streaming);
+            assert_eq!(second["messages"][0], first["messages"][0]);
+            assert_eq!(
+                second["messages"][1]["content"][0],
+                first["messages"][1]["content"][1]
+            );
+            assert_eq!(second["messages"][2], first["messages"][2]);
+            assert_eq!(second["tools"], first["tools"]);
+            assert!(
+                fwd.joycode_codex_signature_retry_body(
+                    &AppType::Codex,
+                    &provider,
+                    Some(&route),
+                    &thinking_signature_error(),
+                    &retry,
+                )
+                .is_none(),
+                "a second rejection must not retry"
+            );
+        }
+    }
+
+    #[test]
+    fn joycode_codex_signature_retry_keeps_thinking_on_a_fresh_user_turn() {
+        use super::super::providers::transform_codex_anthropic::responses_request_to_anthropic;
+
+        let fwd = test_forwarder(Duration::from_secs(10), Duration::from_secs(10));
+        let mut body = joycode_signed_tool_request();
+        body["input"].as_array_mut().unwrap().extend([
+            json!({"role":"assistant", "content":"Done"}),
+            json!({"role":"user", "content":"Now explain the result"}),
+        ]);
+        let retry = fwd
+            .joycode_codex_signature_retry_body(
+                &AppType::Codex,
+                &test_provider_with_type(Some("joycode")),
+                Some(&joycode_thinking_route()),
+                &thinking_signature_error(),
+                &body,
+            )
+            .unwrap();
+        let converted = responses_request_to_anthropic(retry, 8192).unwrap();
+        assert_eq!(converted["thinking"]["type"], "adaptive");
+        assert_eq!(converted["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn joycode_codex_signature_retry_does_not_affect_other_apps_or_providers() {
+        let fwd = test_forwarder(Duration::from_secs(10), Duration::from_secs(10));
+        let route = joycode_thinking_route();
+        let body = joycode_signed_tool_request();
+        for app in [
+            AppType::Claude,
+            AppType::ClaudeDesktop,
+            AppType::GrokBuild,
+            AppType::Gemini,
+        ] {
+            assert!(fwd
+                .joycode_codex_signature_retry_body(
+                    &app,
+                    &test_provider_with_type(Some("joycode")),
+                    Some(&route),
+                    &thinking_signature_error(),
+                    &body,
+                )
+                .is_none());
+        }
+        for provider_type in [None, Some("codex_oauth"), Some("xai_oauth")] {
+            assert!(fwd
+                .joycode_codex_signature_retry_body(
+                    &AppType::Codex,
+                    &test_provider_with_type(provider_type),
+                    Some(&route),
+                    &thinking_signature_error(),
+                    &body,
+                )
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn joycode_codex_signature_retry_uses_resolved_wire_protocol_not_model_name() {
+        use super::super::providers::joycode::JoycodeWireApi;
+
+        let fwd = test_forwarder(Duration::from_secs(10), Duration::from_secs(10));
+        let provider = test_provider_with_type(Some("joycode"));
+        let body = joycode_signed_tool_request();
+        let mut route = joycode_thinking_route();
+        for wire in [JoycodeWireApi::Chat, JoycodeWireApi::Responses] {
+            route.wire_api = wire;
+            assert!(fwd
+                .joycode_codex_signature_retry_body(
+                    &AppType::Codex,
+                    &provider,
+                    Some(&route),
+                    &thinking_signature_error(),
+                    &body,
+                )
+                .is_none());
+        }
+        assert!(fwd
+            .joycode_codex_signature_retry_body(
+                &AppType::Codex,
+                &provider,
+                None,
+                &thinking_signature_error(),
+                &body,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn joycode_codex_signature_retry_requires_specific_http_400() {
+        let fwd = test_forwarder(Duration::from_secs(10), Duration::from_secs(10));
+        let provider = test_provider_with_type(Some("joycode"));
+        let route = joycode_thinking_route();
+        let body = joycode_signed_tool_request();
+        let errors = [
+            ProxyError::UpstreamError {
+                status: 400,
+                body: Some("invalid request".into()),
+            },
+            ProxyError::UpstreamError {
+                status: 400,
+                body: Some("invalid authentication signature".into()),
+            },
+            ProxyError::UpstreamError {
+                status: 400,
+                body: None,
+            },
+            ProxyError::UpstreamError {
+                status: 401,
+                body: Some("Invalid signature in thinking block".into()),
+            },
+            ProxyError::UpstreamError {
+                status: 429,
+                body: Some("Invalid signature in thinking block".into()),
+            },
+            ProxyError::UpstreamError {
+                status: 500,
+                body: Some("Invalid signature in thinking block".into()),
+            },
+            ProxyError::Timeout("Invalid signature in thinking block".into()),
+        ];
+        for error in errors {
+            assert!(
+                fwd.joycode_codex_signature_retry_body(
+                    &AppType::Codex,
+                    &provider,
+                    Some(&route),
+                    &error,
+                    &body,
+                )
+                .is_none(),
+                "must not recover {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn joycode_codex_signature_retry_respects_rectifier_switches() {
+        let mut fwd = test_forwarder(Duration::from_secs(10), Duration::from_secs(10));
+        for config in [
+            RectifierConfig {
+                enabled: false,
+                ..RectifierConfig::default()
+            },
+            RectifierConfig {
+                request_thinking_signature: false,
+                ..RectifierConfig::default()
+            },
+        ] {
+            fwd.rectifier_config = config;
+            assert!(fwd
+                .joycode_codex_signature_retry_body(
+                    &AppType::Codex,
+                    &test_provider_with_type(Some("joycode")),
+                    Some(&joycode_thinking_route()),
+                    &thinking_signature_error(),
+                    &joycode_signed_tool_request(),
+                )
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn joycode_codex_signature_retry_skips_models_that_require_thinking() {
+        let fwd = test_forwarder(Duration::from_secs(10), Duration::from_secs(10));
+        let mut route = joycode_thinking_route();
+        route.id = "claude-fable-5.1".into();
+        assert!(fwd
+            .joycode_codex_signature_retry_body(
+                &AppType::Codex,
+                &test_provider_with_type(Some("joycode")),
+                Some(&route),
+                &thinking_signature_error(),
+                &joycode_signed_tool_request(),
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn joycode_codex_signature_retry_skips_foreign_or_missing_replay() {
+        let fwd = test_forwarder(Duration::from_secs(10), Duration::from_secs(10));
+        let mut body = joycode_signed_tool_request();
+        for encrypted_content in [
+            Value::Null,
+            json!("openai-ciphertext"),
+            json!("ccswitch-anthropic-thinking-v1:invalid"),
+        ] {
+            body["input"][1]["encrypted_content"] = encrypted_content;
+            assert!(fwd
+                .joycode_codex_signature_retry_body(
+                    &AppType::Codex,
+                    &test_provider_with_type(Some("joycode")),
+                    Some(&joycode_thinking_route()),
+                    &thinking_signature_error(),
+                    &body,
+                )
+                .is_none());
         }
     }
 

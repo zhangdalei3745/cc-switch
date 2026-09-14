@@ -98,6 +98,32 @@ pub(crate) fn decode_anthropic_thinking_block(encrypted_content: &str) -> Option
     encode_anthropic_thinking_block(&block).map(|_| block)
 }
 
+/// Remove only bridge-owned signed thinking replay after an upstream signature
+/// rejection. Keep the reasoning items (including summaries/IDs), foreign
+/// ciphertext, and all visible/tool history unchanged. The next conversion
+/// re-evaluates whether the trailing tool turn can still enable thinking.
+pub(crate) fn remove_anthropic_thinking_replay(body: &mut Value) -> usize {
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for item in items {
+        if item.get("type").and_then(Value::as_str) == Some("reasoning")
+            && item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .and_then(decode_anthropic_thinking_block)
+                .is_some()
+        {
+            if let Some(object) = item.as_object_mut() {
+                object.remove("encrypted_content");
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 pub(crate) fn responses_reasoning_item_from_anthropic_block(
     item_id: &str,
     block: &Value,
@@ -2588,6 +2614,47 @@ mod tests {
         let result = anthropic_response_to_responses(input).unwrap();
         assert_eq!(result["status"], "incomplete");
         assert_eq!(result["incomplete_details"]["reason"], "content_filter");
+    }
+
+    #[test]
+    fn test_remove_anthropic_thinking_replay_only_removes_bridge_envelopes() {
+        let signed = encode_anthropic_thinking_block(
+            &json!({"type":"thinking", "thinking":"check", "signature":"old"}),
+        )
+        .unwrap();
+        let redacted =
+            encode_anthropic_thinking_block(&json!({"type":"redacted_thinking", "data":"opaque"}))
+                .unwrap();
+        let mut body = json!({
+            "model":"Claude-Opus-4.8-hq",
+            "input":[
+                {"type":"reasoning", "id":"rs_1", "summary":[{"type":"summary_text","text":"keep"}], "encrypted_content":signed},
+                {"type":"reasoning", "id":"rs_2", "summary":[], "encrypted_content":redacted},
+                {"type":"reasoning", "encrypted_content":"foreign-ciphertext"},
+                {"type":"reasoning", "encrypted_content":"ccswitch-anthropic-thinking-v1:malformed"},
+                {"type":"message", "role":"user", "content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]},
+                {"type":"message", "role":"assistant", "encrypted_content":signed, "content":"visible text"}
+            ]
+        });
+        let mut expected = body.clone();
+        for index in [0, 1] {
+            expected["input"][index]
+                .as_object_mut()
+                .unwrap()
+                .remove("encrypted_content");
+        }
+        assert_eq!(remove_anthropic_thinking_replay(&mut body), 2);
+        assert_eq!(body, expected);
+        assert_eq!(remove_anthropic_thinking_replay(&mut body), 0);
+    }
+
+    #[test]
+    fn test_remove_anthropic_thinking_replay_leaves_other_request_shapes_unchanged() {
+        for mut body in [json!({}), json!({"input":"hello"}), json!({"messages":[]})] {
+            let original = body.clone();
+            assert_eq!(remove_anthropic_thinking_replay(&mut body), 0);
+            assert_eq!(body, original);
+        }
     }
 
     #[test]
