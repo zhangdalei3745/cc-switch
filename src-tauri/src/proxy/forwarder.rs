@@ -1864,12 +1864,17 @@ impl RequestForwarder {
                     provider.id
                 );
             }
-            super::providers::transform_codex_responses_xai_sanitize::apply_xai_native_responses_request_compat(
-                &mut request_body,
-                &provider.id,
-                super::providers::codex_provider_upstream_model(provider).as_deref(),
-                &provider.settings_config,
-            );
+            // xAI additionally rejects root JSON Schema combinators and some
+            // optional Responses metadata. JoyCode only needs namespace flattening;
+            // applying xAI-specific sanitization there would expand the change.
+            if super::providers::provider_needs_xai_native_responses_rewrite(provider) {
+                super::providers::transform_codex_responses_xai_sanitize::apply_xai_native_responses_request_compat(
+                    &mut request_body,
+                    &provider.id,
+                    super::providers::codex_provider_upstream_model(provider).as_deref(),
+                    &provider.settings_config,
+                );
+            }
         }
 
         if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
