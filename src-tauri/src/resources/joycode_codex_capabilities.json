@@ -1,0 +1,490 @@
+{
+  "source": "codex-cli 0.162.0-alpha.17.2 debug models --bundled",
+  "captured_on": "2026-10-21",
+  "models": [
+    {
+      "slug": "gpt-6-astra",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": true,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "multi_agent_reasoning_effort": "xhigh"
+    },
+    {
+      "slug": "gpt-6.1-sol",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": true,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "multi_agent_reasoning_effort": "xhigh"
+    },
+    {
+      "slug": "gpt-6-sol",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": false,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2"
+    },
+    {
+      "slug": "gpt-6-luna",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": false,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2"
+    },
+    {
+      "slug": "gpt-5.6-sol",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": false,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2"
+    },
+    {
+      "slug": "gpt-5.6-terra",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": false,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2"
+    },
+    {
+      "slug": "gpt-5.6-luna",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": false,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v1"
+    },
+    {
+      "slug": "gpt-daybreak-blue-latest",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": false,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2"
+    },
+    {
+      "slug": "gpt-daybreak-red-latest",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "high",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": false,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2"
+    },
+    {
+      "slug": "gpt-5.5",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "apply_patch_tool_type": "freeform",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": true,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_reasoning_effort_updates": false,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false
+    }
+  ]
+}
