@@ -373,7 +373,7 @@ pub fn resolve_codex_catalog_tool_profile(
         return CodexCatalogToolProfile::NativeResponses;
     }
     // Keep this opt-in narrower than routing: only the existing JoyCode native
-    // catalog gains the two verified per-model apply_patch declarations. Do not
+    // catalog inherits corresponding official GPT client capabilities. Do not
     // change explicitly configured Anthropic/Chat providers or same-named models
     // at another supplier. The external signed gateway is not yet verified.
     if super::joycode::is_joycode_provider(provider)

@@ -366,9 +366,9 @@ impl CodexLiveStateSnapshot {
 pub enum CodexCatalogToolProfile {
     ProxyChat,
     NativeResponses,
-    /// JoyCode internal uses the conservative native template, but the two verified
-    /// Responses models get freeform apply_patch and default managed-edit guidance. Other
-    /// JoyCode models retain their existing conservative catalog entries.
+    /// JoyCode internal GPT Responses models inherit the corresponding official
+    /// Codex model's client-side capabilities. Unmatched / non-GPT rows keep the
+    /// conservative native template; hosted OpenAI services are not advertised.
     JoycodeResponses,
     /// Codex talks (through cc-switch's proxy) to a native Anthropic Messages
     /// gateway. Like `NativeResponses` it must suppress Codex's freeform custom
@@ -381,7 +381,7 @@ pub enum CodexCatalogToolProfile {
 
 // A tool declaration alone is insufficient: Sol may otherwise edit via shell
 // redirection, bypassing Codex's managed fileChange/TurnDiff tracking. Apply this
-// default harness hint only to the two verified models, never over a user preamble.
+// default harness hint only to matched official GPT models, never over a user preamble.
 const JOYCODE_RESPONSES_EDIT_INSTRUCTIONS: &str = "Use apply_patch for manual file edits instead of writing files through shell commands. Keep shell commands for reading files, running tests and builds, and producing generated artifacts.";
 
 impl CodexCatalogToolProfile {
@@ -1467,27 +1467,6 @@ fn codex_catalog_model_entry(
         }
     }
 
-    // Only these exact JoyCode model IDs have passed native custom-tool/SSE
-    // and tool-result replay probes. Do not infer support from a GPT prefix or
-    // enable it provider-wide: the same catalog also contains Chat/Messages rows.
-    if profile == CodexCatalogToolProfile::JoycodeResponses
-        && matches!(spec.model.as_str(), "GPT-5.6 Sol" | "GPT-6 Astra")
-    {
-        entry_obj.insert("apply_patch_tool_type".to_string(), json!("freeform"));
-        if spec
-            .base_instructions
-            .as_deref()
-            .is_none_or(|text| text.trim().is_empty())
-        {
-            let base = entry_obj
-                .get("base_instructions")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let instructions = format!("{base}\n\n{JOYCODE_RESPONSES_EDIT_INSTRUCTIONS}");
-            entry_obj.insert("base_instructions".to_string(), json!(instructions));
-        }
-    }
-
     // Per-model reasoning levels override the template's conservative
     // none/high default (e.g. a LiteLLM gateway serving a model that accepts
     // low/medium/high/xhigh/max). Applies to every profile.
@@ -2144,21 +2123,194 @@ fn codex_model_catalog_from_settings(
     let default_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
 
-    // Native providers use the bundled clean template (no freeform apply_patch,
-    // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
-    // entry so the proxy can rewrite custom<->function tools as before.
+    // Start native providers from the clean template. Only the scoped JoyCode
+    // GPT postprocessor below inherits official client capabilities; unmatched
+    // rows remain conservative. ProxyChat keeps its existing gpt-5.5 template.
     let template = match profile {
         CodexCatalogToolProfile::NativeResponses
         | CodexCatalogToolProfile::JoycodeResponses
         | CodexCatalogToolProfile::Anthropic => load_codex_native_responses_template(),
         CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
     };
-    Ok(Some(codex_model_catalog_from_specs(
-        &specs,
-        &template,
-        profile,
-        default_context_window,
-    )))
+    let mut catalog =
+        codex_model_catalog_from_specs(&specs, &template, profile, default_context_window);
+    if profile == CodexCatalogToolProfile::JoycodeResponses {
+        let official_models = load_joycode_official_models();
+        if let Some(entries) = catalog.get_mut("models").and_then(Value::as_array_mut) {
+            for (entry, spec) in entries.iter_mut().zip(&specs) {
+                apply_joycode_official_capabilities(entry, spec, &official_models);
+            }
+        }
+    }
+    Ok(Some(catalog))
+}
+
+/// Client-side capabilities only: do not clone hosted search, Responses Lite,
+/// experimental tools, access tiers, reviewer-model overrides or vendor prompts.
+/// These require OpenAI services / account access rather than model capability.
+const JOYCODE_CODEX_CAPABILITY_FIELDS: &[&str] = &[
+    "default_reasoning_level",
+    "supported_reasoning_levels",
+    "shell_type",
+    "apply_patch_tool_type",
+    "supports_reasoning_summaries",
+    "supports_reasoning_summary_parameter",
+    "default_reasoning_summary",
+    "support_verbosity",
+    "default_verbosity",
+    "truncation_policy",
+    "supports_parallel_tool_calls",
+    "supports_image_detail_original",
+    "effective_context_window_percent",
+    "input_modalities",
+    "supports_reasoning_effort_updates",
+    "node_repl_auto_review_required",
+    "node_repl_disabled",
+    "tool_mode",
+    "multi_agent_version",
+    "multi_agent_reasoning_effort",
+];
+
+fn joycode_official_model_slug(model: &str) -> Option<String> {
+    // Only normalize presentation separators. Never strip suffixes or a vendor
+    // namespace: a preview / unrelated model must not inherit another's tools.
+    let slug = model.trim().to_ascii_lowercase().replace(' ', "-");
+    slug.starts_with("gpt-").then_some(slug)
+}
+
+fn bundled_joycode_codex_capabilities() -> Vec<Value> {
+    let catalog: Value =
+        serde_json::from_str(include_str!("resources/joycode_codex_capabilities.json"))
+            .expect("bundled JoyCode Codex capabilities must be valid JSON");
+    catalog["models"].as_array().cloned().unwrap_or_default()
+}
+
+fn overlay_joycode_official_models(models: &mut Vec<Value>, catalog: &Value) {
+    if let Some(entries) = catalog.get("models").and_then(Value::as_array) {
+        for entry in entries {
+            let Some(slug) = entry.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            // Require a complete Codex model entry, not a generic /v1/models row.
+            if !slug.starts_with("gpt-")
+                || !entry
+                    .get("supported_reasoning_levels")
+                    .is_some_and(Value::is_array)
+                || !entry.get("shell_type").is_some_and(Value::is_string)
+                || !entry
+                    .get("default_reasoning_level")
+                    .is_some_and(Value::is_string)
+                || !entry
+                    .get("support_verbosity")
+                    .is_some_and(Value::is_boolean)
+                || !entry.get("truncation_policy").is_some_and(Value::is_object)
+            {
+                continue;
+            }
+            if let Some(existing) = models.iter_mut().find(|model| model["slug"] == slug) {
+                *existing = entry.clone();
+            } else {
+                models.push(entry.clone());
+            }
+        }
+    }
+}
+
+fn load_joycode_official_models_uncached() -> Vec<Value> {
+    let mut models = bundled_joycode_codex_capabilities();
+    // Prefer the installed client's current bundled metadata to the snapshot.
+    // Tests use only the deterministic snapshot plus their isolated CODEX_HOME.
+    #[cfg(not(test))]
+    for candidate in codex_cli_candidates() {
+        let Ok(output) = codex_bundled_models_command(&candidate).output() else {
+            continue;
+        };
+        if output.status.success() {
+            if let Ok(catalog) = serde_json::from_slice::<Value>(&output.stdout) {
+                overlay_joycode_official_models(&mut models, &catalog);
+                break;
+            }
+        }
+    }
+    // A fetched official cache is newer than the installed bundled catalog.
+    // Missing / corrupt caches must never prevent a provider switch.
+    let path = get_codex_config_dir().join("models_cache.json");
+    if path.exists() {
+        match read_json_file(&path) {
+            Ok(catalog) => overlay_joycode_official_models(&mut models, &catalog),
+            Err(err) => log::warn!("Ignoring unreadable official Codex model cache: {err}"),
+        }
+    }
+    models
+}
+
+fn load_joycode_official_models() -> Vec<Value> {
+    #[cfg(not(test))]
+    {
+        static CACHE: OnceCell<Vec<Value>> = OnceCell::new();
+        CACHE
+            .get_or_init(load_joycode_official_models_uncached)
+            .clone()
+    }
+    #[cfg(test)]
+    load_joycode_official_models_uncached()
+}
+
+fn apply_joycode_official_capabilities(
+    entry: &mut Value,
+    spec: &CodexCatalogModelSpec,
+    official_models: &[Value],
+) {
+    let Some(slug) = joycode_official_model_slug(&spec.model) else {
+        return;
+    };
+    let Some(official) = official_models.iter().find(|model| model["slug"] == slug) else {
+        return;
+    };
+    let Some(obj) = entry.as_object_mut() else {
+        return;
+    };
+    for key in JOYCODE_CODEX_CAPABILITY_FIELDS {
+        // Removing absent optional fields preserves the official parser default
+        // instead of leaking the neutral template's conservative value.
+        obj.remove(*key);
+        if let Some(value) = official.get(*key) {
+            obj.insert((*key).to_string(), value.clone());
+        }
+    }
+    if let Some(modalities) = spec.input_modalities.as_deref() {
+        obj.insert(
+            "input_modalities".into(),
+            json!(codex_catalog_input_modalities(
+                &spec.model,
+                Some(modalities),
+            )),
+        );
+    }
+    if let Some(parallel) = spec.supports_parallel_tool_calls {
+        obj.insert("supports_parallel_tool_calls".into(), json!(parallel));
+    }
+    apply_codex_reasoning_level_override(
+        obj,
+        official
+            .get("default_reasoning_level")
+            .and_then(Value::as_str),
+        spec,
+    );
+    if spec
+        .base_instructions
+        .as_deref()
+        .is_none_or(|text| text.trim().is_empty())
+    {
+        let base = obj
+            .get("base_instructions")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        obj.insert(
+            "base_instructions".into(),
+            json!(format!("{base}\n\n{JOYCODE_RESPONSES_EDIT_INSTRUCTIONS}")),
+        );
+    }
 }
 
 fn set_codex_model_catalog_json_field(
@@ -6775,29 +6927,70 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
-    fn joycode_responses_catalog_only_enables_verified_models_apply_patch() {
-        let model_ids = [
-            "GPT-5.6 Sol",
-            "GPT-6 Astra",
-            "Claude-Opus-4.8-hq",
-            "Claude-Opus-5-hq",
-            "DeepSeek-V4-Pro",
-            "Doubao-Seed-2.0-pro",
-            "GLM-5.2-jcloud",
-            "GLM-5.3",
-            "JoyAI-Code-1.5",
-            "JoyCode-Base-V3",
-            "Kimi-K3",
-            "Kimi-K3-jcloud",
-            "MiniMax-M3",
-            "GPT-6 Astra-preview",
-            "GPT-5.6 Sol-other",
-            "gpt-6-astra",
-            "unknown",
-        ];
-        let settings = json!({"modelCatalog": {"models": model_ids.iter()
+    #[serial]
+    fn joycode_responses_catalog_matches_corresponding_official_gpt_capabilities() {
+        let _home = CodexLiveTestHome::new();
+        let models = ["GPT-5.6 Sol", "GPT-6 Astra", "GPT-6 Sol", "GPT-6.1 Sol"];
+        let settings = json!({"modelCatalog": {"models": models.iter()
             .map(|model| json!({"model": model, "contextWindow": 200_000}))
             .collect::<Vec<_>>()}});
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "",
+            CodexCatalogToolProfile::JoycodeResponses,
+        )
+        .unwrap()
+        .unwrap();
+        let official = bundled_joycode_codex_capabilities();
+        for (index, model) in models.iter().enumerate() {
+            let entry = &catalog["models"][index];
+            let slug = joycode_official_model_slug(model).unwrap();
+            let reference = official.iter().find(|entry| entry["slug"] == slug).unwrap();
+            for key in JOYCODE_CODEX_CAPABILITY_FIELDS {
+                assert_eq!(entry.get(*key), reference.get(*key), "{model}: {key}");
+            }
+            assert_eq!(entry["slug"], *model);
+            assert_eq!(entry["context_window"], 200_000);
+            assert_eq!(entry["max_context_window"], 200_000);
+            assert_eq!(entry["apply_patch_tool_type"], "freeform");
+            assert_eq!(entry["shell_type"], "unified_exec");
+            assert!(entry["base_instructions"]
+                .as_str()
+                .unwrap()
+                .contains(JOYCODE_RESPONSES_EDIT_INSTRUCTIONS));
+            // Do not advertise account/backend-private services to JoyCode.
+            assert_eq!(entry["supports_search_tool"], false);
+            assert_eq!(entry["experimental_supported_tools"], json!([]));
+            assert!(entry.get("use_responses_lite").is_none());
+            assert!(entry.get("auto_review_model_override").is_none());
+        }
+        assert_eq!(
+            catalog["models"][0]["node_repl_auto_review_required"],
+            false
+        );
+        assert_eq!(catalog["models"][3]["node_repl_auto_review_required"], true);
+    }
+
+    #[test]
+    #[serial]
+    fn joycode_responses_leaves_unmatched_models_and_other_profiles_unchanged() {
+        let _home = CodexLiveTestHome::new();
+        let models = [
+            "Claude-Opus-5-hq",
+            "GLM-5.3",
+            "DeepSeek-V4-Pro",
+            "Kimi-K3-jcloud",
+            "MiniMax-M3",
+            "JoyAI-Code-1.5",
+            "JoyCode-Base-V3",
+            "GPT-6 Astra-preview",
+            "GPT-5.6 Sol-other",
+            "vendor/GPT-6 Astra",
+            "GPT-99 Unknown",
+            "unknown",
+        ];
+        let settings = json!({"modelCatalog": {"models": models.iter()
+            .map(|model| json!({"model": model})).collect::<Vec<_>>()}});
         let native = codex_model_catalog_from_settings(
             &settings,
             "",
@@ -6812,57 +7005,139 @@ base_url = "https://production.api/v1"
         )
         .unwrap()
         .unwrap();
-        for (index, model) in model_ids.iter().enumerate() {
-            let mut expected = native["models"][index].clone();
-            if index < 2 {
-                expected["apply_patch_tool_type"] = json!("freeform");
-                expected["base_instructions"] = json!(format!(
-                    "{}\n\n{JOYCODE_RESPONSES_EDIT_INSTRUCTIONS}",
-                    expected["base_instructions"].as_str().unwrap()
-                ));
-            }
+        assert_eq!(joycode, native);
+        for profile in [
+            CodexCatalogToolProfile::NativeResponses,
+            CodexCatalogToolProfile::Anthropic,
+        ] {
+            let settings = json!({"modelCatalog": {"models": [{"model": "GPT-6.1 Sol"}]}});
+            let catalog = codex_model_catalog_from_settings(&settings, "", profile)
+                .unwrap()
+                .unwrap();
+            assert!(catalog["models"][0].get("apply_patch_tool_type").is_none());
+            assert_eq!(catalog["models"][0]["shell_type"], "shell_command");
             assert_eq!(
-                joycode["models"][index], expected,
-                "unexpected catalog change for {model}"
+                catalog["models"][0]["supported_reasoning_levels"],
+                load_codex_native_responses_template()["supported_reasoning_levels"]
             );
-            assert_eq!(joycode["models"][index]["shell_type"], "shell_command");
-            assert_eq!(joycode["models"][index]["supports_search_tool"], false);
-            assert_eq!(
-                joycode["models"][index]["supports_parallel_tool_calls"],
-                false
-            );
-            assert!(native["models"][index]
-                .get("apply_patch_tool_type")
-                .is_none());
         }
     }
 
     #[test]
-    fn joycode_responses_keeps_native_row_overrides_and_neutral_instructions() {
+    #[serial]
+    fn joycode_responses_preserves_explicit_row_overrides_and_permissions() {
+        let _home = CodexLiveTestHome::new();
         let settings = json!({"modelCatalog": {"models": [{
-            "model": "GPT-6 Astra", "displayName": "Custom label",
-            "contextWindow": 123_456, "supportsParallelToolCalls": true,
+            "model": "GPT-6.1 Sol", "displayName": "Custom label",
+            "contextWindow": 123_456, "supportsParallelToolCalls": false,
             "inputModalities": ["text"], "baseInstructions": "User preamble",
             "reasoningLevels": ["none", "high"], "defaultReasoningLevel": "none"
         }]}});
-        let mut native = codex_model_catalog_from_settings(
+        let config = "approval_policy = \"on-request\"\nsandbox_mode = \"workspace-write\"\napprovals_reviewer = \"user\"\n";
+        let catalog = codex_model_catalog_from_settings(
             &settings,
-            "",
-            CodexCatalogToolProfile::NativeResponses,
-        )
-        .unwrap()
-        .unwrap();
-        let joycode = codex_model_catalog_from_settings(
-            &settings,
-            "",
+            config,
             CodexCatalogToolProfile::JoycodeResponses,
         )
         .unwrap()
         .unwrap();
-        native["models"][0]["apply_patch_tool_type"] = json!("freeform");
-        assert_eq!(joycode, native);
-        assert_eq!(joycode["models"][0]["base_instructions"], "User preamble");
-        assert!(joycode["models"][0].get("model_messages").is_none());
+        let entry = &catalog["models"][0];
+        assert_eq!(entry["base_instructions"], "User preamble");
+        assert_eq!(entry["display_name"], "Custom label");
+        assert_eq!(entry["context_window"], 123_456);
+        assert_eq!(entry["supports_parallel_tool_calls"], false);
+        assert_eq!(entry["input_modalities"], json!(["text"]));
+        assert_eq!(entry["default_reasoning_level"], "none");
+        let efforts: Vec<_> = entry["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap())
+            .collect();
+        assert_eq!(efforts, ["none", "high"]);
+        assert!(entry.get("model_messages").is_none());
+        let prepared = prepare_codex_config_text_with_model_catalog(
+            &settings,
+            config,
+            CodexCatalogToolProfile::JoycodeResponses,
+        )
+        .unwrap();
+        let doc: toml::Value = prepared.parse().unwrap();
+        assert_eq!(doc["approval_policy"].as_str(), Some("on-request"));
+        assert_eq!(doc["sandbox_mode"].as_str(), Some("workspace-write"));
+        assert_eq!(doc["approvals_reviewer"].as_str(), Some("user"));
+    }
+
+    #[test]
+    fn joycode_official_matching_is_exact_after_presentation_normalization() {
+        assert_eq!(
+            joycode_official_model_slug(" GPT-6.1 Sol ").as_deref(),
+            Some("gpt-6.1-sol")
+        );
+        assert_eq!(
+            joycode_official_model_slug("gpt-6-astra").as_deref(),
+            Some("gpt-6-astra")
+        );
+        assert!(joycode_official_model_slug("vendor/gpt-6-astra").is_none());
+        assert!(joycode_official_model_slug("Claude-Opus-5-hq").is_none());
+        let models = bundled_joycode_codex_capabilities();
+        for spec in codex_catalog_model_specs(&json!({"modelCatalog": {"models": [
+            {"model": "GPT-6 Astra-preview"}, {"model": "GPT-99 Unknown"}
+        ]}})) {
+            let mut entry = json!({"sentinel": true});
+            apply_joycode_official_capabilities(&mut entry, &spec, &models);
+            assert_eq!(entry, json!({"sentinel": true}));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn joycode_official_cache_overlays_exact_models_and_falls_back_per_row() {
+        let _home = CodexLiveTestHome::new();
+        let path = get_codex_config_dir().join("models_cache.json");
+        let mut updated = bundled_joycode_codex_capabilities()
+            .into_iter()
+            .find(|entry| entry["slug"] == "gpt-6.1-sol")
+            .unwrap();
+        updated["default_reasoning_level"] = json!("medium");
+        updated["supported_reasoning_levels"] = json!([
+            {"effort": "medium", "description": "updated"}
+        ]);
+        write_json_file(
+            &path,
+            &json!({"models": [updated,
+                {"slug": "gpt-6-astra"},
+                {"slug": "gpt-99-incomplete", "shell_type": "unified_exec",
+                 "default_reasoning_level": "high", "supported_reasoning_levels": []}
+            ]}),
+        )
+        .unwrap();
+        let models = load_joycode_official_models();
+        let sol = models
+            .iter()
+            .find(|entry| entry["slug"] == "gpt-6.1-sol")
+            .unwrap();
+        assert_eq!(sol["default_reasoning_level"], "medium");
+        assert_eq!(sol["apply_patch_tool_type"], "freeform");
+        assert!(!models
+            .iter()
+            .any(|entry| entry["slug"] == "gpt-99-incomplete"));
+        let astra = models
+            .iter()
+            .find(|entry| entry["slug"] == "gpt-6-astra")
+            .unwrap();
+        assert_eq!(astra["apply_patch_tool_type"], "freeform");
+        assert_eq!(astra["default_reasoning_level"], "low");
+        fs::write(&path, "invalid JSON").unwrap();
+        assert_eq!(
+            load_joycode_official_models(),
+            bundled_joycode_codex_capabilities()
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            load_joycode_official_models(),
+            bundled_joycode_codex_capabilities()
+        );
     }
 
     #[test]
