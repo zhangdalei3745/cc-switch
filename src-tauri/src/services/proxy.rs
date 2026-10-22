@@ -3684,7 +3684,7 @@ impl ProxyService {
         config: &Value,
         expected_auth: Option<&CodexAuthFileSnapshot>,
     ) -> Result<(), String> {
-        use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
+        use crate::codex_config::get_codex_auth_path;
 
         let auth = config.get("auth");
         let config_str = config.get("config").and_then(|v| v.as_str());
@@ -3763,7 +3763,7 @@ impl ProxyService {
                 }
 
                 let config_result = prepared_cfg.as_deref().map_or(Ok(()), |cfg| {
-                    crate::config::write_text_file(&get_codex_config_path(), cfg)
+                    crate::codex_config::write_codex_live_config_text_preserving_owned(cfg)
                         .map_err(|error| format!("写入 Codex config 失败: {error}"))
                 });
                 match config_result {
@@ -3783,7 +3783,7 @@ impl ProxyService {
                         // Unguarded provider writes preserve an existing login;
                         // only restore transactions interpret empty auth as an
                         // exact-generation deletion.
-                        crate::config::write_text_file(&get_codex_config_path(), cfg)
+                        crate::codex_config::write_codex_live_config_text_preserving_owned(cfg)
                             .map_err(|e| format!("写入 Codex config 失败: {e}"))
                     } else {
                         crate::codex_config::write_codex_live_atomic(auth, Some(cfg))
@@ -3798,8 +3798,10 @@ impl ProxyService {
                             .map_err(|e| format!("写入 Codex auth 失败: {e}"))
                     }
                 }
-                (None, Some(cfg)) => crate::config::write_text_file(&get_codex_config_path(), cfg)
-                    .map_err(|e| format!("写入 Codex config 失败: {e}")),
+                (None, Some(cfg)) => {
+                    crate::codex_config::write_codex_live_config_text_preserving_owned(cfg)
+                        .map_err(|e| format!("写入 Codex config 失败: {e}"))
+                }
                 (None, None) => Ok(()),
             }
         };

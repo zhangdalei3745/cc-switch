@@ -981,6 +981,104 @@ pub fn delete_codex_provider_config(
     Ok(())
 }
 
+/// `~/.codex/config.toml` 中由 Codex 本体与用户独占的顶层表。
+///
+/// CC Switch 只负责 `model` / `model_provider` / `model_providers` 等供应商
+/// 路由字段；插件与市场登记完全由 Codex 本体写入。供应商备份重建时并不包含
+/// 这些表，一旦整文覆盖 Live 就会把用户自建市场（例如 `cc-aistack`）的安装
+/// 记录抹掉，且 Codex 只能自愈内置插件，无法恢复用户自建市场。
+const CODEX_LIVE_OWNED_TABLES: [&str; 2] = ["marketplaces", "plugins"];
+
+/// 以「写入前的 Live」为准，把 Codex 独占的顶层表继承到即将写入的文本中。
+///
+/// 语义（整表替换，**不做新旧并集**）：
+/// - Live 有该表 → 整表覆盖目标表，连同 `enabled = false` 与全部子表一并保留；
+/// - Live 无该表 → 从目标中移除，尊重用户在 Codex 侧的卸载动作；
+/// - 两边都没有 → 原样返回入参，不触发 `toml_edit` 重排版。
+///
+/// 并集语义会复活已卸载的插件、把 `enabled = false` 翻回 true，因此被刻意排除。
+///
+/// 失败处理一律「降级 + 告警」而非中止写入：Live 读不出或解析失败时本就无法
+/// 提取这些表，若在此返回 `Err`，崩溃恢复 / 停代理还原链路会被一个损坏的
+/// `config.toml` 永久阻塞，用户将失去从应用内自救的唯一出口。降级后的行为与
+/// 本次改动前完全一致，不构成回归。
+///
+/// 已知残余风险：读 Live 与写 Live 之间存在毫秒级竞态，若 Codex 恰在该窗口内
+/// 安装插件，这次安装会被覆盖。窗口已压缩到写入函数内部，接受该残余风险。
+fn carry_over_codex_live_owned_tables(new_text: &str) -> String {
+    // 空文本代表「清空 config.toml」，此时继承插件会写出一个只剩 [plugins]
+    // 的畸形文件，故直接放行，保持既有语义。
+    if new_text.trim().is_empty() {
+        return new_text.to_string();
+    }
+
+    let config_path = get_codex_config_path();
+    if !config_path.exists() {
+        return new_text.to_string();
+    }
+
+    let live_text = match fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(e) => {
+            log::warn!("读取 Codex Live config.toml 失败，本次写入不继承插件与市场登记: {e}");
+            return new_text.to_string();
+        }
+    };
+
+    merge_codex_live_owned_tables(new_text, &live_text)
+}
+
+/// `carry_over_codex_live_owned_tables` 的纯函数内核，便于直接测试。
+fn merge_codex_live_owned_tables(new_text: &str, live_text: &str) -> String {
+    let live_doc = match live_text.parse::<DocumentMut>() {
+        Ok(doc) => doc,
+        Err(e) => {
+            log::warn!("解析 Codex Live config.toml 失败，本次写入不继承插件与市场登记: {e}");
+            return new_text.to_string();
+        }
+    };
+
+    let live_tables: Vec<(&str, toml_edit::Item)> = CODEX_LIVE_OWNED_TABLES
+        .iter()
+        .filter_map(|table| live_doc.get(table).map(|item| (*table, item.clone())))
+        .collect();
+
+    // 先判断是否真的需要改写，避免在无事可做时让 toml_edit 重排版整个文件。
+    let target_doc_probe = match new_text.parse::<DocumentMut>() {
+        Ok(doc) => doc,
+        Err(e) => {
+            log::warn!("解析待写入的 Codex config.toml 失败，本次写入不继承插件与市场登记: {e}");
+            return new_text.to_string();
+        }
+    };
+    let target_has_owned_table = CODEX_LIVE_OWNED_TABLES
+        .iter()
+        .any(|table| target_doc_probe.get(table).is_some());
+    if live_tables.is_empty() && !target_has_owned_table {
+        return new_text.to_string();
+    }
+
+    let mut target_doc = target_doc_probe;
+    for table in CODEX_LIVE_OWNED_TABLES {
+        target_doc.remove(table);
+    }
+    for (table, item) in live_tables {
+        target_doc[table] = item;
+    }
+
+    target_doc.to_string()
+}
+
+/// 写 `~/.codex/config.toml`，并继承 Live 中 Codex 独占的插件与市场登记。
+///
+/// 所有会整文覆盖 Live `config.toml` 的生产路径都必须走这里，不要直接调用
+/// `write_text_file`，否则会重新引入插件登记丢失的问题。
+pub fn write_codex_live_config_text_preserving_owned(text: &str) -> Result<(), AppError> {
+    let config_path = get_codex_config_path();
+    let merged = carry_over_codex_live_owned_tables(text);
+    write_text_file(&config_path, &merged)
+}
+
 /// 原子写 Codex 的 `auth.json` 与 `config.toml`，在第二步失败时回滚第一步
 pub fn write_codex_live_atomic(
     auth: &Value,
@@ -1018,7 +1116,9 @@ pub fn write_codex_live_atomic(
     write_json_file(&auth_path, auth)?;
 
     // 第二步：写 config.toml（失败则回滚 auth.json）
-    if let Err(e) = write_text_file(&config_path, &cfg_text) {
+    // 注意：`config_text_opt == None` 会把 config.toml 清空，连 model_providers
+    // 一并抹掉。该语义早于本次改动，这里不作更改，仅在继承插件时跳过空文本。
+    if let Err(e) = write_codex_live_config_text_preserving_owned(&cfg_text) {
         // 回滚 auth.json
         if let Some(bytes) = old_auth {
             let _ = atomic_write(&auth_path, &bytes);
@@ -1091,7 +1191,7 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
 
-    write_text_file(&config_path, &cfg_text)
+    write_codex_live_config_text_preserving_owned(&cfg_text)
 }
 
 pub fn extract_codex_auth_api_key(auth: &Value) -> Option<String> {
@@ -4338,6 +4438,203 @@ mod tests {
             }
             let _ = crate::settings::reload_settings();
         }
+    }
+
+    const LIVE_WITH_PLUGINS: &str = r#"model = "gpt-5.4"
+model_provider = "codex-official"
+
+[marketplaces.cc-aistack]
+source = "https://example.test/aistack"
+
+[plugins."aistack@cc-aistack"]
+enabled = true
+
+[plugins."disabled-one@cc-aistack"]
+enabled = false
+
+[plugins."aistack@cc-aistack".mcp_servers.helper]
+command = "/opt/helper"
+"#;
+
+    /// provider-rebuilt 备份的形状：只有供应商路由字段，没有任何插件登记。
+    const PROVIDER_REBUILT_CONFIG: &str = r#"model = "deepseek-chat"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://example.test/v1"
+"#;
+
+    #[test]
+    fn merge_owned_tables_carries_marketplaces_and_plugins_from_live() {
+        let merged = merge_codex_live_owned_tables(PROVIDER_REBUILT_CONFIG, LIVE_WITH_PLUGINS);
+        let doc = merged
+            .parse::<DocumentMut>()
+            .expect("merged config must stay valid TOML");
+
+        // 供应商路由字段必须来自新文本，不能被 Live 回滚。
+        assert_eq!(doc["model_provider"].as_str(), Some("custom"));
+        assert_eq!(doc["model"].as_str(), Some("deepseek-chat"));
+        assert_eq!(
+            doc["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://example.test/v1")
+        );
+
+        // 插件与市场登记必须从 Live 继承回来。
+        assert!(doc.get("marketplaces").is_some());
+        assert_eq!(
+            doc["marketplaces"]["cc-aistack"]["source"].as_str(),
+            Some("https://example.test/aistack")
+        );
+        assert_eq!(
+            doc["plugins"]["aistack@cc-aistack"]["enabled"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn merge_owned_tables_keeps_disabled_plugin_disabled() {
+        let merged = merge_codex_live_owned_tables(PROVIDER_REBUILT_CONFIG, LIVE_WITH_PLUGINS);
+        let doc = merged.parse::<DocumentMut>().expect("valid TOML");
+
+        // 并集语义会把 enabled = false 翻回 true；整表替换必须保持停用状态。
+        assert_eq!(
+            doc["plugins"]["disabled-one@cc-aistack"]["enabled"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn merge_owned_tables_preserves_nested_plugin_subtables() {
+        let merged = merge_codex_live_owned_tables(PROVIDER_REBUILT_CONFIG, LIVE_WITH_PLUGINS);
+        let doc = merged.parse::<DocumentMut>().expect("valid TOML");
+
+        assert_eq!(
+            doc["plugins"]["aistack@cc-aistack"]["mcp_servers"]["helper"]["command"].as_str(),
+            Some("/opt/helper")
+        );
+    }
+
+    #[test]
+    fn merge_owned_tables_drops_stale_plugins_when_live_has_none() {
+        // Live 不再有插件表（用户在 Codex 侧卸载），目标里的陈旧登记必须被移除，
+        // 否则会复活已卸载的插件。
+        let stale_target = r#"model = "gpt-5.4"
+
+[plugins."ghost@cc-aistack"]
+enabled = true
+"#;
+        let live_without_plugins = "model = \"gpt-5.4\"\nmodel_provider = \"codex-official\"\n";
+
+        let merged = merge_codex_live_owned_tables(stale_target, live_without_plugins);
+        let doc = merged.parse::<DocumentMut>().expect("valid TOML");
+
+        assert!(
+            doc.get("plugins").is_none(),
+            "stale plugins table must be removed, got: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_owned_tables_degrades_without_rewriting_when_live_is_malformed() {
+        // Live 解析失败时不得中止写入：崩溃恢复链路必须仍能写回配置自救。
+        let merged =
+            merge_codex_live_owned_tables(PROVIDER_REBUILT_CONFIG, "this is = = broken [[");
+        assert_eq!(merged, PROVIDER_REBUILT_CONFIG);
+    }
+
+    #[test]
+    fn merge_owned_tables_degrades_when_target_is_malformed() {
+        let broken_target = "not = = valid [[";
+        let merged = merge_codex_live_owned_tables(broken_target, LIVE_WITH_PLUGINS);
+        assert_eq!(merged, broken_target);
+    }
+
+    #[test]
+    fn merge_owned_tables_returns_input_verbatim_when_nothing_to_carry_over() {
+        // 回归保护：没有可继承的表时，必须逐字节返回原文，不让 toml_edit 重排版，
+        // 以免打破其他测试里对 config.toml 文本的精确断言。
+        let target =
+            "model = \"gpt-5.4\"\n\n\n# trailing comment\nmodel_provider   =    \"custom\"\n";
+        let live = "model = \"old\"\n";
+        assert_eq!(merge_codex_live_owned_tables(target, live), target);
+    }
+
+    #[test]
+    #[serial]
+    fn carry_over_skips_empty_text_to_avoid_plugins_only_file() {
+        let _home = CodexLiveTestHome::new();
+        let config_path = get_codex_config_path();
+        std::fs::create_dir_all(config_path.parent().expect("codex dir")).expect("mkdir");
+        std::fs::write(&config_path, LIVE_WITH_PLUGINS).expect("seed live config");
+
+        assert_eq!(carry_over_codex_live_owned_tables(""), "");
+    }
+
+    #[test]
+    #[serial]
+    fn carry_over_passes_through_when_live_config_is_absent() {
+        let _home = CodexLiveTestHome::new();
+        assert_eq!(
+            carry_over_codex_live_owned_tables(PROVIDER_REBUILT_CONFIG),
+            PROVIDER_REBUILT_CONFIG
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn provider_config_write_keeps_user_marketplace_registration() {
+        // 复现线上故障：provider-rebuilt 备份整文覆盖 Live 后，cc-aistack 消失。
+        let _home = CodexLiveTestHome::new();
+        let config_path = get_codex_config_path();
+        std::fs::create_dir_all(config_path.parent().expect("codex dir")).expect("mkdir");
+        std::fs::write(&config_path, LIVE_WITH_PLUGINS).expect("seed live config");
+
+        write_codex_live_config_atomic(Some(PROVIDER_REBUILT_CONFIG))
+            .expect("provider config write must succeed");
+
+        let written = std::fs::read_to_string(&config_path).expect("read back live config");
+        let doc = written.parse::<DocumentMut>().expect("valid TOML");
+
+        assert_eq!(
+            doc["model_provider"].as_str(),
+            Some("custom"),
+            "provider switch must still take effect"
+        );
+        assert_eq!(
+            doc["plugins"]["aistack@cc-aistack"]["enabled"].as_bool(),
+            Some(true),
+            "user plugin registration must survive the overwrite: {written}"
+        );
+        assert_eq!(
+            doc["marketplaces"]["cc-aistack"]["source"].as_str(),
+            Some("https://example.test/aistack"),
+            "user marketplace registration must survive the overwrite: {written}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn auth_bundle_write_keeps_user_plugin_registration() {
+        let _home = CodexLiveTestHome::new();
+        let config_path = get_codex_config_path();
+        std::fs::create_dir_all(config_path.parent().expect("codex dir")).expect("mkdir");
+        std::fs::write(&config_path, LIVE_WITH_PLUGINS).expect("seed live config");
+
+        write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "sk-test" }),
+            Some(PROVIDER_REBUILT_CONFIG),
+        )
+        .expect("auth bundle write must succeed");
+
+        let written = std::fs::read_to_string(&config_path).expect("read back live config");
+        let doc = written.parse::<DocumentMut>().expect("valid TOML");
+
+        assert_eq!(doc["model_provider"].as_str(), Some("custom"));
+        assert_eq!(
+            doc["plugins"]["aistack@cc-aistack"]["enabled"].as_bool(),
+            Some(true),
+            "user plugin registration must survive the overwrite: {written}"
+        );
     }
 
     #[derive(Debug, PartialEq)]
