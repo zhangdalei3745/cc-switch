@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codex → Joycode 缓存块超限分析</title>
+<style>body{max-width:980px;margin:40px auto;padding:0 24px;font:16px/1.8 system-ui;color:#243247;background:#f7f9fc}section{background:white;padding:22px;margin:18px 0;border:1px solid #dce3ed;border-radius:12px}h1,h2{line-height:1.4}pre{white-space:pre-wrap;background:#152238;color:#e3efff;padding:18px;border-radius:8px;overflow:auto}code{overflow-wrap:anywhere}strong{color:#a34215}table{border-collapse:collapse;width:100%}td,th{border:1px solid #dce3ed;padding:10px;text-align:left}</style></head>
+<body><h1>Codex → Joycode 缓存块超限分析</h1><p>日期：2026-10-29（Asia/Shanghai）｜范围：只读诊断，未修改业务代码、配置或发送重放请求。</p>
+<section><h2>1. 结论与边界</h2><p>该异常是上游请求校验失败：上游统计到 5 个 cache_control 块，但只允许 4 个。它不是上下文 token 超限，也不是 thinking signature 错误。</p><p><strong>已关联到用户提供的精确 request id：本机出站请求只有 4 个 cache_control。</strong>所以“本地重复注入直接生成 5 个”的解释不符合此次证据。更可能是 Joycode 网关或其下游适配层补充/展开了缓存块；第 5 个块的确切位置尚未取得上游最终请求体，不能当作已证实事实。</p></section>
+<section><h2>2. 文本链路图</h2><pre>Codex 客户端 /responses
+        │ Responses → Anthropic Messages 转换
+        ▼
+CC Switch 第一次缓存注入：pre=0 → 新增 4 个
+        │ tools + system + 最新消息 + 较早 user 锚点
+        ▼
+Joycode 分支第二次调用：existing=4 → no-op
+        │ 出站最终 CacheTrace：count=4
+        ▼
+Joycode /api/saas/anthropic/v1/messages
+        │ 网关 / 下游适配处理（待取得证据）
+        ▼
+上游校验：Found 5 → HTTP 400
+        ▼
+CC Switch 包装错误 → Codex 显示 /responses 失败</pre><p>/responses 是客户端入口，不代表实际调用的上游接口也是 Responses。</p></section>
+<section><h2>3. 可复核证据</h2><table><tr><th>位置</th><th>证据</th></tr>
+<tr><td>用户上游 request id</td><td><code>202610290724476119822758268d9d6Dxs1ceLI</code></td></tr>
+<tr><td>本机数据库 proxy_request_logs</td><td>本地 request_id：2e80016b-14b7-454d-94da-40f69a625b2f；session_id：e83b0eba-a759-4ad1-a217-6c2d70d8bcba；模型 Claude-Opus-5-hq；status_code=400；error_message 含上述精确上游 id。</td></tr>
+<tr><td>同一 session 的日志，15:24:46</td><td>4bp(tools+system+msgs-latest+msgs-prior-user,5m,pre=0)；随后 no-op(existing=4)。</td></tr>
+<tr><td>出站 CacheTrace</td><td>endpoint=/v1/messages；cache_controls=count=4,ttls=default；body_hash=be131df16084d916；准备发送的 JSON 同一 hash，266072 字节。</td></tr>
+<tr><td>另一次失败关联</td><td>上游 id 202610290732487840411778268d9d6kcBh0TP7，session d367b8b6-f53e-430c-bb0e-d3a69a7b7222；对应 15:32:46 日志先注入 3 个、再新增 1 个，最终仍 count=4。</td></tr></table>
+<p>日志文件：<code>/Users/zhangdalei1/.cc-switch/logs/cc-switch.log</code>；数据库：<code>/Users/zhangdalei1/.cc-switch/cc-switch.db</code>（只读查询）。本地数据库记录时间是请求结束附近时间，不能拿它直接代替发送时间；上游 id 的时间编码未做官方确认。</p></section>
+<section><h2>4. 代码定位</h2><ul>
+<li><code>src-tauri/src/proxy/cache_injector.rs</code>：用 4.saturating_sub(existing) 限制新增预算。长历史可启用第 4 个较早 user 锚点；已有 &gt;4 时仅警告并保留，不自动删 caller-owned 标记。</li>
+<li><code>src-tauri/src/proxy/forwarder.rs:1795,1846</code>：Codex → Anthropic 转换后注入；Joycode Anthropic 分支再调用。它不是完全幂等的：已有 3 个时可能再找一个更早消息并补到 4；但本次第二次调用没有超过 4。</li>
+<li><code>src-tauri/src/proxy/forwarder.rs:1933–1960,4306</code>：覆盖参数和私有字段过滤之后，对最终 body 递归统计 cache_control。该统计比注入器的顶层块计数更广，此次也只计到 4。</li>
+<li><code>src-tauri/src/proxy/providers/joycode.rs:1808</code>：当前 decorate_body 未添加缓存标记。</li></ul></section>
+<section><h2>5. 最小验证与处置建议（未执行）</h2><ol>
+<li>请 Joycode 按精确上游 request id 查询接入请求与实际下游请求，比较 cache_control 的 JSON 路径，确认额外块来自身份 system、自动缓存、块展开还是其他逻辑。</li>
+<li>诊断实验优先限制到 JD Joycode + Codex + Anthropic 路由：将本地自动缓存预算临时降到 3，使用同一受控测试请求比较结果。若 4 失败、3 成功，可支持“上游另占一个槽位”的假设，但仍不能证明具体添加位置。</li>
+<li>单纯关闭“较早 user 锚点”不足以保证只发 3 个，因为第二次 inject 可在历史中再补一个。应保证两处注入共享 3 个预算，或统一到唯一最终注入点。</li>
+<li>必要时短暂关闭专用 cache_injection 开关排查；只关闭 optimizer.enabled 不够，Codex bridge 会强制 enabled=true。关闭缓存可能增加成本与首 token 延迟，也可能影响其他走同一配置的请求，不应直接修改用户配置。</li>
+<li>若确认上游固定增加一个缓存块，再实施窄范围兼容策略及测试。不要全局删缓存标记，也不要改 thinking 内容、模型映射或其他供应商。</li></ol>
+<p>建议回归覆盖：0/3/4 个已有标记；短/长历史；两次注入；工具结果与 thinking 混合；cache_injection=false；其他供应商及非 Anthropic 路由不变。对同一错误原样重试不能消除结构性超限。</p></section>
+<section><h2>6. 官方规则</h2><p><a href="https://platform.claude.com/docs/en/build-with-claude/prompt-caching#when-to-use-multiple-breakpoints">Anthropic Prompt caching 文档</a>说明显式 cache_control 断点最多 4 个。此处未对 Joycode 的内部实现作官方事实断言。</p></section>
+</body></html>
