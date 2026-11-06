@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CC Switch 上游 main 合并与 JoyCode 保留技术文档</title>
+<style>
+  body{max-width:1080px;margin:0 auto;padding:32px 24px 64px;font:16px/1.75 system-ui,-apple-system,sans-serif;color:#243247;background:#f6f8fb}
+  header{background:#152238;color:#fff;padding:28px;border-radius:14px;margin-bottom:22px}
+  h1{margin:0 0 10px;font-size:28px;line-height:1.3}
+  h2{margin:0 0 12px;font-size:20px;color:#16263d}
+  h3{margin:18px 0 8px;font-size:16px;color:#263a52}
+  section{background:#fff;border:1px solid #dce3ed;border-radius:12px;padding:20px 22px;margin:18px 0}
+  pre{background:#101c30;color:#e5f0ff;padding:18px;border-radius:9px;overflow:auto;line-height:1.55}
+  code{background:#edf3fa;color:#173b63;padding:2px 5px;border-radius:4px}
+  table{border-collapse:collapse;width:100%}
+  th,td{border:1px solid #dce3ed;padding:9px 10px;text-align:left;vertical-align:top}
+  th{background:#f2f6fb}
+  ul,ol{padding-left:24px}
+  .muted{color:#617087}
+  .success{color:#14764f;font-weight:700}
+  .warning{color:#a34215;font-weight:700}
+  .flow{white-space:pre}
+</style>
+</head>
+<body>
+<header>
+  <h1>CC Switch 上游 main 合并与 JoyCode 保留技术文档</h1>
+  <p>日期：2026-11-06（Asia/Shanghai）｜工作分支：<code>codex/fix/merge-upstream-main-joycode</code></p>
+  <p class="muted">目标：同步官方 <code>upstream/main</code> 最新提交，同时验证并保留 fork 的 JoyCode 专用能力。</p>
+</header>
+
+<section>
+  <h2>1. 合并对象与结果</h2>
+  <table>
+    <tr><th>项</th><th>值</th></tr>
+    <tr><td>合并基线</td><td><code>c58a25b2ae583710f24ce8867e48340bda619f7d</code></td></tr>
+    <tr><td>Fork 侧父提交</td><td><code>5f4b1b0b395585d0561ec0f073f70aa6b5051b4c</code></td></tr>
+    <tr><td>上游父提交</td><td><code>bd247a4adb92adfee0f065f0bdaac9580cfc276a</code>（2026-09-13，<code>v3.20.3</code> 后续提交）</td></tr>
+    <tr><td>上游新增提交</td><td>60 个</td></tr>
+    <tr><td>合并提交</td><td><code>30a38afbecacd818868a18ce1a80cd4574c39c9e</code></td></tr>
+    <tr><td>合并策略</td><td>Git <code>ort</code>，无文本冲突；发现并处理 1 个语义冲突</td></tr>
+    <tr><td>应用版本</td><td><code>3.20.3</code></td></tr>
+  </table>
+  <pre class="flow">                 c58a25b2 共同基线
+                       │
+      ┌────────────────┴────────────────┐
+      │                                 │
+fork/JoyCode 分支                 upstream/main
+5f4b1b0b                         bd247a4a
+（JoyCode 适配 + 本地修复）       （60 个上游提交）
+      │                                 │
+      └──────────────┬──────────────────┘
+                     ▼
+        30a38afb 合并提交
+   fix(joycode)：合并上游最新 main 并保留模型映射
+                     │
+                     ▼
+       本地完整前后端检查通过</pre>
+</section>
+
+<section>
+  <h2>2. JoyCode 保留规则</h2>
+  <p>本次采用“保留 JoyCode 专用实现、接受上游通用改进、用回归测试证明兼容”的规则，而不是机械地把所有重叠点改成 fork 旧值。</p>
+  <ol>
+    <li><strong>JoyCode 专用实现必须保留：</strong>合并后 <code>src-tauri/src/proxy/providers/joycode.rs</code> 与 <code>src/components/providers/forms/JoycodeConnectionFields.tsx</code> 相对合并前 fork 侧无删除或回退。</li>
+    <li><strong>本地网关前置判断必须保留：</strong><code>providerNeedsRouting</code> 中 JoyCode 判断仍位于 official-provider 短路逻辑之前，确保 JoyCode 即使被标为 official 类别也仍经过本地代理。</li>
+    <li><strong>目标供应商模型字段必须来自 JoyCode 配置：</strong><code>apply_claude_takeover_fields_for_provider</code> 继续对 <code>provider.is_joycode()</code> 使用目标供应商配置生成模型显示名，避免菜单残留旧供应商。</li>
+    <li><strong>上游通用别名变化需验证后接受：</strong>上游把接管稳定别名从 Sonnet 4.6 / Opus 4.8 提升为 Sonnet 5 / Opus 5。路由本身按角色关键词映射，因此不应为了旧测试期望而在生产代码中固化旧别名。</li>
+    <li><strong>用测试锁住真实兼容关系：</strong>JoyCode 回归测试现在断言 <code>claude-sonnet-5 → Claude-Sonnet-4.6-hq</code>、<code>claude-opus-5 → Claude-Opus-4.8-hq</code>，证明新客户端别名仍会投影到 JoyCode 配置模型。</li>
+  </ol>
+  <pre class="flow">Claude Code 模型菜单
+  ANTHROPIC_DEFAULT_SONNET_MODEL = claude-sonnet-5
+        │
+        ▼
+ModelMapping::map_model(...)
+  按 role 关键词识别 sonnet / opus
+        │
+        ├── sonnet → Claude-Sonnet-4.6-hq
+        └── opus   → Claude-Opus-4.8-hq
+        │
+        ▼
+Joycode::resolve_model(...)
+  在当前账号目录中解析真实模型和 wire API
+        │
+        ▼
+Anthropic 路由 → JoyCode 网关</pre>
+</section>
+
+<section>
+  <h2>3. 语义冲突与处理</h2>
+  <h3>现象</h3>
+  <p>Git 自动合并没有留下冲突标记，但完整 Rust 测试发现 1 个失败：</p>
+  <pre>services::proxy::tests::joycode_claude_takeover_sources_migrated_models_from_provider
+left:  Some("claude-sonnet-5")
+right: Some("claude-sonnet-4-6")</pre>
+  <h3>原因</h3>
+  <p>上游提交 <code>38cfafdc</code> 将 Claude Code 接管稳定别名升级为 <code>claude-sonnet-5</code> / <code>claude-opus-5</code>。JoyCode 回归测试创建于旧别名时代，断言仍停留在 <code>claude-sonnet-4-6</code> / <code>claude-opus-4-8</code>。</p>
+  <h3>判定</h3>
+  <p>这不是 JoyCode 生产能力被上游删除，而是测试期望过时。依据有三点：</p>
+  <ul>
+    <li><code>ModelMapping::map_model</code> 按 <code>sonnet</code> / <code>opus</code> 角色关键词选择目标模型，不要求客户端别名版本与上游目录版本一致。</li>
+    <li><code>forwarder.rs</code> 先执行模型映射，再调用 JoyCode 的 <code>resolve_model</code>，保证进入 JoyCode 的是配置后的真实模型。</li>
+    <li>JoyCode 的供应商配置仍指向 <code>Claude-Sonnet-4.6-hq</code> 和 <code>Claude-Opus-4.8-hq</code>。</li>
+  </ul>
+  <h3>最小修复</h3>
+  <p>只更新该回归测试的别名期望，并追加两个模型映射断言；没有为 JoyCode 增加生产分支，也没有把上游通用别名改回旧值，避免扩大影响半径。</p>
+</section>
+
+<section>
+  <h2>4. 合并后能力核对</h2>
+  <table>
+    <tr><th>能力点</th><th>核对结果</th></tr>
+    <tr><td>JoyCode 后端适配器</td><td class="success">保留；合并前后 <code>joycode.rs</code> 内容一致</td></tr>
+    <tr><td>JoyCode 前端连接表单</td><td class="success">保留；合并前后 <code>JoycodeConnectionFields.tsx</code> 内容一致</td></tr>
+    <tr><td>本地代理强制路由</td><td class="success">保留；JoyCode 判断仍优先于 official-provider 短路</td></tr>
+    <tr><td>Claude 接管模型显示名</td><td class="success">保留；仍从目标 JoyCode 供应商配置读取</td></tr>
+    <tr><td>Sonnet 5 / Opus 5 新别名</td><td class="success">接受上游通用改动，并用映射测试验证可路由到 JoyCode 4.6 / 4.8 模型</td></tr>
+    <tr><td>Codex / Responses / namespace 兼容</td><td class="success">由全量后端测试覆盖；未回退 JoyCode 专用转换逻辑</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>5. 验证记录</h2>
+  <table>
+    <tr><th>检查</th><th>结果</th></tr>
+    <tr><td><code>pnpm typecheck</code></td><td class="success">通过</td></tr>
+    <tr><td><code>pnpm format:check</code></td><td class="success">通过</td></tr>
+    <tr><td><code>pnpm test:unit</code></td><td class="success">139 个测试文件、1119 个测试通过</td></tr>
+    <tr><td><code>cargo fmt --check</code></td><td class="success">通过</td></tr>
+    <tr><td><code>cargo clippy -- -D warnings</code></td><td class="success">通过</td></tr>
+    <tr><td><code>cargo test</code></td><td class="success">全部 Rust 测试通过；lib 为 2933 passed / 6 ignored，集成测试均通过</td></tr>
+    <tr><td><code>git diff --check</code></td><td class="success">通过，无空白错误</td></tr>
+  </table>
+  <p>曾有一次 <code>cargo test</code> 暴露上述 JoyCode 语义冲突；完成测试修正后，目标测试和全量测试均重新通过。</p>
+</section>
+
+<section>
+  <h2>6. 风险与后续建议</h2>
+  <ul>
+    <li><span class="warning">未执行真实 JoyCode 登录、账号模型拉取和连续工具调用。</span>单元测试证明模型映射和协议适配代码可编译且行为符合预期，但不能替代真实网关验收。</li>
+    <li>建议在真实环境中回归三件事：JoyCode 登录与模型目录拉取；Claude Code 使用 Sonnet 5 / Opus 5 菜单别名发起请求；Codex 连续工具调用与流式返回。</li>
+    <li>根目录已有 4 个与历史修复相关的未跟踪交接文件。本次未将它们纳入合并提交，避免混入无关内容；后续需单独确认是否入库。</li>
+    <li>上游官方仓库不包含 JoyCode 适配，长期维护时应保持“每次同步上游后执行同一组检查”的节奏。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>7. 复核命令</h2>
+  <pre>git fetch upstream --prune
+git switch -c codex/fix/merge-upstream-main-joycode
+git merge upstream/main
+git diff --check
+cargo fmt --check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+pnpm typecheck
+pnpm format:check
+pnpm test:unit</pre>
+</section>
+</body>
+</html>
