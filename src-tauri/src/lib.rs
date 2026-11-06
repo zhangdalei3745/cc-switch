@@ -1490,7 +1490,8 @@ pub fn run() {
             commands::delete_profile,
             commands::clear_current_profile,
             commands::apply_profile,
-            // model list fetch (OpenAI-compatible /v1/models)
+            // Fetch OpenAI-compatible and Anthropic model lists. Response data structure:
+            // data[].id, data[]?.owned_by. Special: supports Zhipu OpenAI Responses models[].slug.
             commands::fetch_models_for_config,
             commands::fetch_joycode_models,
             commands::discover_joycode_pt_key,
