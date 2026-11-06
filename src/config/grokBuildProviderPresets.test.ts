@@ -7,7 +7,6 @@ import {
   extractCodexBaseUrl,
   extractCodexModelName,
 } from "../utils/providerConfigUtils";
-import { GROK_BUILD_DEFAULT_MODEL } from "../utils/grokBuildConfig";
 
 describe("grokBuildProviderPresets", () => {
   it("has unique preset names", () => {
@@ -53,18 +52,15 @@ describe("grokBuildProviderPresets", () => {
   });
 
   it("uses a Grok default model on every preset", () => {
+    // 只要求是 Grok 系列（可带 x-ai/ 这类厂商前缀），版本号随各家上架情况而定
     for (const preset of grokBuildProviderPresets) {
       const model = extractCodexModelName(preset.config);
-
       if (preset.providerType === "joycode") {
         expect(model, preset.name).toBe("joycode");
         continue;
       }
 
-      expect(
-        model === GROK_BUILD_DEFAULT_MODEL || model === "x-ai/grok-4.5",
-        `${preset.name}: ${model}`,
-      ).toBe(true);
+      expect(model, preset.name).toMatch(/^(?:[\w.-]+\/)?grok-[\w.-]+$/);
     }
   });
 

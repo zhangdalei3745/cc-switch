@@ -1,27 +1,58 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps, PropsWithChildren } from "react";
+import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexFormFields } from "@/components/providers/forms/CodexFormFields";
 import { Form } from "@/components/ui/form";
+import type { FetchedModel } from "@/lib/api/model-fetch";
+import type { CodexChatReasoning } from "@/types";
+
+const modelFetchApiMock = vi.hoisted(() => ({
+  fetchModelsForConfig: vi.fn(),
+  fetchXaiOauthModels: vi.fn(),
+  modelFetchRequestHeaders: vi.fn(),
+  showFetchModelsError: vi.fn(),
+}));
+
+vi.mock("@/lib/api/model-fetch", () => ({
+  fetchModelsForConfig: modelFetchApiMock.fetchModelsForConfig,
+  fetchXaiOauthModels: modelFetchApiMock.fetchXaiOauthModels,
+  modelFetchRequestHeaders: modelFetchApiMock.modelFetchRequestHeaders,
+  showFetchModelsError: modelFetchApiMock.showFetchModelsError,
+}));
+
+// 上游 v4.0.0 起 CodexFormFields 内部使用 useModelMetadataFill（依赖
+// QueryClientProvider）；本文件只测 model fetch 行为，mock 成 no-op 即可。
+vi.mock("@/hooks/useModelMetadataFill", () => ({
+  useModelMetadataFill: () => () => {},
+}));
 
 type CodexFormFieldsProps = ComponentProps<typeof CodexFormFields>;
 
-function FormShell({ children }: PropsWithChildren) {
+const FormShell = ({ children }: PropsWithChildren) => {
   const form = useForm();
-  return <Form {...form}>{children}</Form>;
-}
 
-function renderJoycodeForm(overrides: Partial<CodexFormFieldsProps> = {}) {
-  const props: CodexFormFieldsProps = {
-    isJoycodeProvider: true,
-    codexApiKey: "BJ.joycode-key",
+  return <Form {...form}>{children}</Form>;
+};
+
+// RTL's default whitespace normalizer collapses the multi-line placeholder,
+// so query by a distinctive fragment instead of the exact string.
+const HEADERS_PLACEHOLDER = /X-Provider/;
+
+// The harness owns the headers override state so editing the textarea
+// reproduces the exact user flow: an existing header override is changed
+// while Base URL / API Key stay untouched.
+const INITIAL_HEADERS_OVERRIDE = '{"X-Tenant": "tenant-1"}';
+
+function baseCodexProps(): CodexFormFieldsProps {
+  return {
+    codexApiKey: "sk-test",
     onApiKeyChange: vi.fn(),
-    category: "cn_official",
+    category: "third_party",
     shouldShowApiKeyLink: false,
     websiteUrl: "",
-    shouldShowSpeedTest: false,
-    codexBaseUrl: "https://example.invalid",
+    codexBaseUrl: "https://api.example.com",
     onBaseUrlChange: vi.fn(),
     isFullUrl: false,
     onFullUrlChange: vi.fn(),
@@ -29,7 +60,7 @@ function renderJoycodeForm(overrides: Partial<CodexFormFieldsProps> = {}) {
     onEndpointModalToggle: vi.fn(),
     autoSelect: false,
     onAutoSelectChange: vi.fn(),
-    codexModel: "GPT-5.6 Sol",
+    codexModel: "",
     onModelChange: vi.fn(),
     apiFormat: "openai_responses",
     onApiFormatChange: vi.fn(),
@@ -39,23 +70,8 @@ function renderJoycodeForm(overrides: Partial<CodexFormFieldsProps> = {}) {
     onImpersonateClaudeCodeChange: vi.fn(),
     maxOutputTokens: "",
     onMaxOutputTokensChange: vi.fn(),
-    codexChatReasoning: {},
-    onCodexChatReasoningChange: vi.fn(),
     promptCacheRouting: "auto",
     onPromptCacheRoutingChange: vi.fn(),
-    catalogModels: [
-      {
-        model: "GPT-5.6 Sol",
-        displayName: "GPT-5.6 Sol",
-        contextWindow: 200000,
-      },
-      {
-        model: "Claude-Opus-4.8-hq",
-        displayName: "Claude Opus 4.8",
-        contextWindow: 1000000,
-      },
-    ],
-    onCatalogModelsChange: vi.fn(),
     speedTestEndpoints: [],
     customUserAgent: "",
     onCustomUserAgentChange: vi.fn(),
@@ -63,31 +79,206 @@ function renderJoycodeForm(overrides: Partial<CodexFormFieldsProps> = {}) {
     onLocalProxyHeadersOverrideChange: vi.fn(),
     localProxyBodyOverride: "",
     onLocalProxyBodyOverrideChange: vi.fn(),
-    ...overrides,
+    shouldShowSpeedTest: true,
   };
-
-  return render(
-    <FormShell>
-      <CodexFormFields {...props} />
-    </FormShell>,
-  );
 }
 
-describe("CodexFormFields", () => {
-  it("JoyCode 显示默认模型与 /model 目录，并隐藏重复的协议和认证配置", () => {
-    renderJoycodeForm();
+function renderCodexForm() {
+  const baseProps = baseCodexProps();
 
-    expect(screen.getByLabelText("默认模型")).toHaveValue("GPT-5.6 Sol");
+  function Harness() {
+    const [headersOverride, setHeadersOverride] = useState(
+      INITIAL_HEADERS_OVERRIDE,
+    );
+
+    return (
+      <FormShell>
+        <CodexFormFields
+          {...baseProps}
+          localProxyHeadersOverride={headersOverride}
+          onLocalProxyHeadersOverrideChange={setHeadersOverride}
+        />
+      </FormShell>
+    );
+  }
+
+  return render(<Harness />);
+}
+
+function renderReasoningForm() {
+  function Harness() {
+    const [reasoning, setReasoning] = useState<CodexChatReasoning>({
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking",
+      effortParam: "reasoning_effort",
+      effortValueMode: "passthrough",
+      outputFormat: "auto",
+    });
+
+    return (
+      <FormShell>
+        <output data-testid="reasoning-state">
+          {JSON.stringify(reasoning)}
+        </output>
+        <CodexFormFields
+          {...baseCodexProps()}
+          apiFormat="openai_chat"
+          codexChatReasoning={reasoning}
+          onCodexChatReasoningChange={setReasoning}
+        />
+      </FormShell>
+    );
+  }
+
+  return render(<Harness />);
+}
+
+async function fetchAndSettleModels(models: FetchedModel[]) {
+  modelFetchApiMock.fetchModelsForConfig.mockResolvedValueOnce(models);
+
+  fireEvent.click(
+    screen.getByRole("button", { name: "providerForm.fetchModels" }),
+  );
+
+  await waitFor(() => {
+    expect(modelFetchApiMock.fetchModelsForConfig).toHaveBeenCalled();
+  });
+
+  return screen.findByRole("button", { name: "Select model" });
+}
+
+function changeHeadersOverride(value: string) {
+  fireEvent.change(screen.getByPlaceholderText(HEADERS_PLACEHOLDER), {
+    target: { value },
+  });
+}
+
+describe("CodexFormFields model fetch identity", () => {
+  beforeEach(() => {
+    modelFetchApiMock.fetchModelsForConfig.mockReset();
+    modelFetchApiMock.showFetchModelsError.mockReset();
+  });
+
+  it("修改 Header 覆盖后清空已取到的模型列表", async () => {
+    renderCodexForm();
+
+    // Header 覆盖已有初值，高级区自动展开，textarea 可直接编辑
+    await fetchAndSettleModels([{ id: "model-a", ownedBy: "vendor" }]);
     expect(
-      screen.getByText(/这里的模型会出现在 Codex \/model 菜单中/),
+      screen.getByRole("button", { name: "Select model" }),
+    ).toBeInTheDocument();
+
+    changeHeadersOverride('{"X-Tenant": "tenant-2"}');
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Select model" })).toBeNull();
+    });
+  });
+
+  it("Header 覆盖在途变更后丢弃旧请求返回的模型", async () => {
+    renderCodexForm();
+
+    let resolveFetch!: (models: FetchedModel[]) => void;
+    modelFetchApiMock.fetchModelsForConfig.mockImplementationOnce(
+      () =>
+        new Promise<FetchedModel[]>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+    await waitFor(() => {
+      expect(modelFetchApiMock.fetchModelsForConfig).toHaveBeenCalled();
+    });
+
+    changeHeadersOverride('{"X-Tenant": "tenant-2"}');
+
+    // 旧身份的响应此时才落地。先正向等待响应链走完（按钮恢复可用），
+    // 再断言模型未上榜——否则否定断言会在响应落地前抢先通过。
+    resolveFetch([{ id: "stale-model", ownedBy: "vendor" }]);
+
+    const fetchButton = screen.getByRole("button", {
+      name: "providerForm.fetchModels",
+    });
+    await waitFor(() => {
+      expect(fetchButton).toBeEnabled();
+    });
+
+    expect(screen.queryByRole("button", { name: "Select model" })).toBeNull();
+  });
+});
+
+describe("CodexFormFields reasoning effort", () => {
+  it("restores the default parameter after effort support is disabled and re-enabled", () => {
+    renderReasoningForm();
+
+    const toggle = screen.getByRole("switch", {
+      name: "支持思考等级",
+    });
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("reasoning-state")).toHaveTextContent(
+      '"supportsEffort":false',
+    );
+    expect(screen.getByTestId("reasoning-state")).toHaveTextContent(
+      '"effortParam":"none"',
+    );
+
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("reasoning-state")).toHaveTextContent(
+      '"supportsEffort":true',
+    );
+    expect(screen.getByTestId("reasoning-state")).toHaveTextContent(
+      '"effortParam":"reasoning_effort"',
+    );
+  });
+});
+
+describe("CodexFormFields JoyCode", () => {
+  it("JoyCode 显示默认模型与 /model 目录，并隐藏重复的协议和认证配置", async () => {
+    render(
+      <FormShell>
+        <CodexFormFields
+          {...baseCodexProps()}
+          isJoycodeProvider
+          codexApiKey="BJ.joycode-key"
+          category="cn_official"
+          shouldShowSpeedTest={false}
+          codexModel="GPT-5.6 Sol"
+          catalogModels={[
+            {
+              model: "GPT-5.6 Sol",
+              displayName: "GPT-5.6 Sol",
+              contextWindow: 200000,
+            },
+            {
+              model: "Claude-Opus-4.8-hq",
+              displayName: "Claude Opus 4.8",
+              contextWindow: 1000000,
+            },
+          ]}
+          onCatalogModelsChange={vi.fn()}
+        />
+      </FormShell>,
+    );
+
+    expect(screen.getAllByDisplayValue("GPT-5.6 Sol")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "模型列表" }));
+
+    expect(
+      (
+        await screen.findAllByText(/这里的模型会出现在 Codex \/model 菜单中/)
+      )[0],
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
     expect(screen.queryByText("上游格式")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "providerForm.fetchModels" }),
     ).not.toBeInTheDocument();
 
-    expect(screen.getByRole("button", { name: "Select model" })).toBeVisible();
     expect(screen.getByDisplayValue("Claude-Opus-4.8-hq")).toBeInTheDocument();
   });
 });

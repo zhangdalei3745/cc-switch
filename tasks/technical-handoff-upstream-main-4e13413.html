@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>上游 main 4e13413 合并与 JoyCode 能力保留技术交接</title>
+<style>
+:root {
+  --bg: #f4f7fb;
+  --card: #fff;
+  --ink: #172033;
+  --muted: #566173;
+  --brand: #0f5fa8;
+  --good: #1b6f4a;
+  --warn: #955c00;
+  --line: #d7deeb;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.65 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+}
+.layout { max-width: 1160px; margin: 0 auto; padding: 32px 20px 64px; }
+header {
+  border-radius: 18px;
+  background: linear-gradient(135deg, #0f5fa8 0%, #14486f 62%, #20263a 100%);
+  color: #fff;
+  padding: 34px;
+}
+header h1 { margin: 0 0 10px; font-size: 30px; line-height: 1.3; }
+header p { margin: 0; color: rgba(255,255,255,.82); max-width: 880px; }
+h2 {
+  margin: 34px 0 12px;
+  font-size: 24px;
+  letter-spacing: -.02em;
+}
+h3 { margin: 20px 0 8px; font-size: 17px; color: #1f2d43; }
+section {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 10px 24px rgba(23,32,51,.05);
+  padding: 22px;
+}
+.grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); gap: 12px; }
+.kv {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  background: #fbfcff;
+}
+.kv-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing:.04em; }
+.kv-value { display:block; margin-top:3px; font-weight:650; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:13px; }
+table { width:100%; border-collapse: collapse; margin-top:10px; }
+th, td { border:1px solid var(--line); padding:10px 11px; vertical-align:top; text-align:left; }
+th { background:#eaf1fa; color:#24425e; font-size:13px; }
+td code, li code { background:#eef2f7; border-radius:5px; padding:1px 4px; font-size:.92em; }
+.tag { display:inline-block; border-radius:99px; padding:2px 9px; font-size:12px; font-weight:650; white-space:nowrap; }
+.tag.good { color:var(--good); background:#e3f3eb; }
+.tag.warn { color:var(--warn); background:#fff0d8; }
+.tag.info { color:var(--brand); background:#e6f0fb; }
+pre {
+  margin: 10px 0 0;
+  border-radius: 12px;
+  padding: 15px;
+  background:#182437;
+  color:#e8eefb;
+  overflow:auto;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.notice {
+  border-left:4px solid var(--brand);
+  background:#eef4fb;
+  padding:12px 14px;
+  border-radius:10px;
+  color:#26445c;
+  margin-top:12px;
+}
+.flow { display:grid; grid-template-columns:1fr max-content 1fr; gap:8px; align-items:center; margin-top:12px; }
+.flow-center { text-align:center; color:var(--muted); font-size:20px; }
+.box {
+  border:1px solid #b8cee5;
+  border-radius:11px;
+  background:#f4f8fd;
+  padding:10px 12px;
+}
+.box b { display:block; color:#20394f; }
+.box span { color:var(--muted); font-size:13px; display:block; }
+footer { margin-top:24px; color:var(--muted); font-size:12px; }
+@media (max-width: 760px) {
+  .flow { grid-template-columns:1fr; }
+  .flow-center { transform:rotate(90deg); }
+  header { padding:22px; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<header>
+  <h1>上游 main 4e13413 合并与 JoyCode 能力保留技术交接</h1>
+  <p>本文记录 cc-switch fork 分支合并最新 upstream/main 的过程、冲突决策、协议能力保留清单、测试证据与后续 PR 入口。合并原则是：上游 4.0.26 的新架构完整保留，JoyCode 只作为独立能力叠加，不与 xAI、Copilot、托管 OAuth 或其他 App Type 混用。</p>
+</header>
+
+<section>
+  <h2>1. 合并基线</h2>
+  <div class="grid">
+    <div class="kv"><span class="kv-label">工作分支</span><span class="kv-value">codex/fix/merge-upstream-main-joycode</span></div>
+    <div class="kv"><span class="kv-label">推远分支</span><span class="kv-value">codex/fix/merge-upstream-main-joycode-20261106</span></div>
+    <div class="kv"><span class="kv-label">fork 父提交</span><span class="kv-value">3f2af4a3a7067f895289e2561d6e1a69fddb3784</span></div>
+    <div class="kv"><span class="kv-label">upstream/main</span><span class="kv-value">4e13413ff236860b445e6c7f3f7590e999de0eea</span></div>
+    <div class="kv"><span class="kv-label">目标 PR base</span><span class="kv-value">main（origin/HEAD 已验证）</span></div>
+    <div class="kv"><span class="kv-label">PR 入口</span><span class="kv-value"><a href="https://github.com/zhangdalei3745/cc-switch/compare/main...codex/fix/merge-upstream-main-joycode-20261106" target="_blank" rel="noreferrer">GitHub compare / create PR</a></span></div>
+  </div>
+  <p>合并类型是标准 merge，不做 cherry-pick 或替换树。这样能保留 fork 侧 JoyCode 修复链的历史，也保留 upstream 4.0.26 的 mode/controller/live projection 与新 provider 体系。</p>
+</section>
+
+<section>
+  <h2>2. 合并策略</h2>
+  <table>
+    <thead><tr><th>决策点</th><th>处理规则</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td>上游架构</td><td>mode/controller/live projection、managed accounts、route/aggregation mode、full-url、Copilot、xAI/Grok 保持 upstream 实现。</td><td>避免 JoyCode 分支回填旧 takeover 大文件逻辑，保证后续 rebase 成本最低。</td></tr>
+      <tr><td>JoyCode UI</td><td>恢复 <code>providerType="joycode"</code>、<code>JoycodeConnectionFields</code>、登录凭证、内外网与租户字段到新的 ProviderForm 架构。</td><td>JoyCode 是独立 provider type，不是普通 API Key provider。</td></tr>
+      <tr><td>协议转换</td><td>保留 JoyCode Responses / Anthropic / Chat Completions 的 per-model wire API 与模型元数据；同时保留上游 xAI/Copilot Responses 修复。</td><td>三类能力互不替代，避免任何一个 provider 的兼容逻辑造成其他 provider 回归。</td></tr>
+      <tr><td>xAI vs JoyCode</td><td>xAI/Copilot Grok 的 integer normalize 为独立 gate；JoyCode 只进入 namespace flatten/restore。</td><td>JoyCode 不需要 xAI 的 whole-float 参数重写，混用会引入新的请求语义问题。</td></tr>
+      <tr><td>测试</td><td>以 JoyCode targeted tests + Rust 全量测试 + typecheck 作为禁用回归门槛。</td><td>大版本合并不能只依赖人工浏览 diff。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>3. Rust 冲突处理</h2>
+  <table>
+    <thead><tr><th>文件</th><th>冲突/结构问题</th><th>最终处理</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td><code>src-tauri/src/proxy/forwarder.rs</code></td><td>retry/aggregate 层返回类型与 forward 层外层 <code>if is_copilot</code> 冲突残留。</td><td><code>forward_inner</code> 使用 <code>Result&lt;(ProxyResponse, Option&lt;String&gt;, Option&lt;String&gt;), ProxyError&gt;</code>，不误用 FutureResult；删除残留外层条件。</td><td><span class="tag good">已验证</span></td></tr>
+      <tr><td><code>src-tauri/src/proxy/handlers.rs</code></td><td>重复且残缺的 Claude transform 判定；JoyCode Gemini fallback 因上游新增参数编译冲突。</td><td>保留上游完整 <code>claude_response_needs_transform</code>；Gemini fallback 调用补齐 <code>is_stream</code>。</td><td><span class="tag good">已验证</span></td></tr>
+      <tr><td><code>src-tauri/src/proxy/providers/codex.rs</code></td><td>多余关闭括号；xAI gate 与 JoyCode catalog profile 分支交错。</td><td>修复括号；保留 upstream Copilot catalog tool profile；保留两条 gate：xAI rewrite 与 namespace flatten。</td><td><span class="tag good">已验证</span></td></tr>
+      <tr><td><code>src-tauri/src/proxy/sse.rs</code></td><td>上游新增零拷贝 SSE framer 后，JoyCode 旧 helper 被冲突删除。</td><td>恢复 <code>take_sse_block</code> helper，与上游 framer 并存。</td><td><span class="tag good">已验证</span></td></tr>
+      <tr><td><code>src-tauri/src/codex_config.rs</code></td><td>旧 catalog 文本准备断言与上游 <code>plan_codex_model_catalog</code> 架构冲突。</td><td>保留 <code>sanitize_provider_name</code> 与文本写入 helper，移除不再适用的旧断言；JoyCode catalog 行为测试继续保留。</td><td><span class="tag good">已验证</span></td></tr>
+      <tr><td><code>src-tauri/src/proxy/providers/streaming_responses.rs</code></td><td>上游把零 usage + incomplete 视为未处理 rejection，与 JSON→SSE fallback 生命周期重叠。</td><td>rejection 在 body consumed 前判定；确认 rejection 时只输出 <code>message_start</code> + <code>error</code>，不再追加 <code>message_delta(max_tokens)</code> 与 <code>message_stop</code>。</td><td><span class="tag good">已验证</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>4. Claude Anthropic JSON → SSE fallback 流程</h2>
+  <pre>client 请求 stream=true
+        |
+        v
+upstream 返回 application/json 并拒绝/不处理请求
+        |
+        v
+is_unprocessed_max_output_rejection(body, status)
+        |  判定发生在 responses_to_anthropic... 消费 body 之前
+        v
+responses_to_anthropic_with_web_search_options(body)
+        |
+        v
+message.content 是否为空数组？
+        |-- 是 + confirmed rejection:
+        |       message_start
+        |       event: error  → Upstream rejected the request before processing
+        |       （不输出 max_tokens / message_stop）
+        |
+        |-- 否:
+        |       正常 Anthropic SSE 生命周期
+</pre>
+  <div class="notice">修复后的关键点：Rubric 不是“发现 incomplete 就报错”，而是“零 usage + no/empty output + max_output_tokens”才视为上游未处理；有真实 token 或内容时仍然保持 <code>max_tokens</code> 截断语义。</div>
+</section>
+
+<section>
+  <h2>5. xAI rewrite 与 JoyCode namespace restore 分离</h2>
+  <div class="flow">
+    <div class="box"><b>provider_needs_xai_native_responses_rewrite</b><span>xAI OAuth / xAI API key / api.x.ai / Copilot Grok 场景；负责 whole-float integer normalize。</span></div>
+    <div class="flow-center">→</div>
+    <div class="box"><b>Normalized Responses rewrite</b><span>只改变 xAI/Copilot Grok 需要的请求参数；不作用到 JoyCode。</span></div>
+  </div>
+  <div class="flow">
+    <div class="box"><b>provider_needs_responses_namespace_flatten</b><span>JoyCode native Responses / xAI namespace 场景 / Copilot Grok based on outbound_model。</span></div>
+    <div class="flow-center">→</div>
+    <div class="box"><b>Namespace restore</b><span>按 restore_map 恢复命名空间；integer normalize 由布尔参数显式传入。</span></div>
+  </div>
+  <pre>forwarder:
+if provider_needs_responses_namespace_flatten(provider, outbound_model) {
+    let normalize_integer_arguments =
+        provider_needs_xai_native_responses_rewrite(&provider);
+
+    handle_codex_native_responses_namespace_restore(
+        response, ctx, state, guard, restore_map,
+        normalize_integer_arguments
+    )
+}
+
+JoyCode      -> flatten = true,  normalize_integer_arguments = false
+xAI OAuth    -> flatten = true,  normalize_integer_arguments = true
+Copilot Grok -> flatten 视 outbound_model, normalize 视 provider gate
+其他 provider -> 均为 false
+</pre>
+</section>
+
+<section>
+  <h2>6. 前端冲突处理</h2>
+  <table>
+    <thead><tr><th>文件</th><th>保留的上游能力</th><th>保留的 JoyCode 能力</th></tr></thead>
+    <tbody>
+      <tr><td><code>ClaudeDesktopProviderForm.tsx</code></td><td>新的 Claude Desktop 路由、模型与 runtime catalog 架构。</td><td>JoyCode connection fields、network metadata、runtime model loading、Claude Desktop route projection。</td></tr>
+      <tr><td><code>ClaudeFormFields.tsx</code></td><td>Managed OAuth、Copilot、xAI、普通 API provider 的表单能力。</td><td>JoyCode 下隐藏 API key/base URL/auth selector/config editor；保留登录类型与租户。</td></tr>
+      <tr><td><code>CodexFormFields.tsx</code></td><td>xAI/Copilot/managed account 与 model catalog UI。</td><td>JoyCode signed catalog 模型建议与 per-model wire API；隐藏普通 fetch models 和标准 API key。</td></tr>
+      <tr><td><code>PiProviderForm.tsx</code></td><td>Pi 新增字段与上游表单结构。</td><td>JoyCode provider type 独立分支；不与 <code>AppType::Pi/Agy/Mcode</code> 混用。</td></tr>
+      <tr><td><code>ProviderForm.tsx</code></td><td>新 preset/provider form flow 与上游新增 provider 展示。</td><td>active provider type 识别、保存 <code>joycodeNetwork</code>、<code>joycodeExternalBaseUrl</code>、<code>joycodeLoginType</code>、<code>joycodeTenant</code>。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>7. JoyCode 能力保留清单</h2>
+  <table>
+    <thead><tr><th>能力</th><th>合并后位置/说明</th><th>风险控制</th></tr></thead>
+    <tbody>
+      <tr><td>独立 provider type</td><td><code>ProviderType::Joycode</code> / <code>"joycode"</code>。</td><td>不改变其他 App Type 与 provider type。</td></tr>
+      <tr><td>ptKey 与登录修复链</td><td>JoyCode credential metadata + auth import / runtime token retry。</td><td>不写入 managed OAuth account 语义。</td></tr>
+      <tr><td>网络与租户</td><td>internal/external network、external base URL、tenant。</td><td>UI 与保存字段一一保留。</td></tr>
+      <tr><td>signed model catalog</td><td>Claude / Codex / Claude Desktop 模型与能力、权限元数据。</td><td>catalog 行为测试保留。</td></tr>
+      <tr><td>per-model wire API</td><td>Responses / Anthropic / Chat Completions。</td><td>按模型元数据选择，不做 provider 级硬编码。</td></tr>
+      <tr><td>Claude 模型角色映射</td><td>Claude/Claude Desktop tier 与 alias 映射。</td><td>不与上游安全路由回退混用。</td></tr>
+      <tr><td>Codex <code>/model</code> catalog</td><td>JoyCode catalog profile 分支。</td><td>不干扰 upstream Copilot profile。</td></tr>
+      <tr><td>stream validation</td><td>JoyCode stream response 校验。</td><td>复用上游 framer，保留必要 block helper。</td></tr>
+      <tr><td>Anthropic JSON → SSE fallback</td><td>JSON reframe 成标准 Anthropic lifecycle。</td><td>确认 rejection 时输出干净错误。</td></tr>
+      <tr><td>namespace flatten/restore</td><td>JoyCode native Responses 兼容。</td><td>与 xAI integer rewrite 分开 gate。</td></tr>
+      <tr><td>重试链</td><td>runtime token retry、response chain retry、prompt cache key retry、thinking signature retry。</td><td>上游 forwarder/retry 新结构下保留语义。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>8. 上游 4.0.26 能力不应回退</h2>
+  <ul>
+    <li>GitHub Copilot support and catalog tool profile。</li>
+    <li>managed accounts、route mode、aggregation mode。</li>
+    <li>runtime model catalog UI 与 live projection。</li>
+    <li>full-url 与新增 providers。</li>
+    <li>xAI / Grok / Copilot Responses compatibility。</li>
+    <li>new mode/controller/live projection architecture。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>9. 测试证据</h2>
+  <table>
+    <thead><tr><th>验证项</th><th>命令 / 范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>前端类型</td><td><code>pnpm typecheck</code></td><td><span class="tag good">通过</span></td></tr>
+      <tr><td>JoyCode 前端目标测试</td><td>ClaudeDesktopProviderForm / ClaudeFormFields / CodexFormFields 相关 Vitest 文件</td><td><span class="tag good">3 files / 46 tests passed</span></td></tr>
+      <tr><td>Rust 全量单测</td><td><code>cargo test --manifest-path src-tauri/Cargo.toml --lib</code></td><td><span class="tag good">4567 passed，0 failed，15 ignored</span></td></tr>
+      <tr><td>Responses rejection 精确测试</td><td>两个 streaming_responses 精确用例</td><td><span class="tag good">通过</span></td></tr>
+      <tr><td>格式/冲突/空白检查</td><td><code>cargo fmt --check</code>、<code>git diff --check</code>、<code>git diff --cached --check</code>、冲突标记 grep</td><td><span class="tag good">通过</span></td></tr>
+      <tr><td>测试环境适配</td><td>OMP Bun 全局目录测试改为 PATH-aware 断言。</td><td><span class="tag info">本机 PATH 已包含 Bun 时不误判产品问题</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>10. 后续跟进</h2>
+  <ul>
+    <li><span class="tag warn">Release</span> merge PR 人工抽查 JoyCode provider type 与 xAI gate 分离，尤其是 <code>providers/codex.rs</code> 与 forwarder 命名空间分支。</li>
+    <li><span class="tag warn">Runtime</span> PR 合并前建议在真实 JoyCode ptKey + external network 环境各跑一次 Claude / Codex streaming smoke；本次仓库级验证无法替代上游真实服务测试。</li>
+    <li><span class="tag info">Hygiene</span> cargo check 当前有两个 dead-code warning，均为 merge 保留的测试辅助/旧 API 函数，不影响测试与类型检查；可在后续单独 PR 标注或删除，避免本次 merge 扩大影响半径。</li>
+  </ul>
+</section>
+
+<footer>
+  <p>生成时间：2026-11-06 · fork parent <code>3f2af4a3</code> · upstream/main <code>4e13413f</code> · merge rule: keep upstream 4.0.26 architecture, preserve JoyCode as isolated capability.</p>
+</footer>
+</div>
+</body>
+</html>

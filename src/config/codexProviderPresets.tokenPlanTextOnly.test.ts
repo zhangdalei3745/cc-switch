@@ -8,6 +8,8 @@ import { codexProviderPresets } from "./codexProviderPresets";
 // 否则会 fail-open 成"可附图"。
 const textOnlyDeepSeekHosts = [
   "Baidu Qianfan Token Plan",
+  // FluxA 转售的是同一套千帆 Token Plan（国际 team 部署），同样纯文本
+  "FluxA Token Plan",
   "Tencent Token Plan Enterprise Pro",
   "Tencent Token Plan Enterprise Pro (Intl)",
 ];
@@ -25,11 +27,16 @@ describe("third-party Token Plan DeepSeek V4 rows stay text-only", () => {
     }
   });
 
-  it("the official DeepSeek preset keeps fail-open (no modality override)", () => {
+  // 2026-10-25 起官方预设只留 Flash（Pro 贵且效果不如 Flash）
+  it("declares image input for the official V4.1 Flash row", () => {
     const preset = codexProviderPresets.find((p) => p.name === "DeepSeek");
     expect(preset).toBeDefined();
-    for (const row of preset!.modelCatalog ?? []) {
-      expect(row.inputModalities, row.model).toBeUndefined();
-    }
+    expect(preset!.modelCatalog?.map((row) => row.model)).toEqual([
+      "deepseek-flash",
+    ]);
+    expect(
+      preset!.modelCatalog?.find((row) => row.model === "deepseek-flash")
+        ?.inputModalities,
+    ).toEqual(["text", "image"]);
   });
 });
