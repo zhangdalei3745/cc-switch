@@ -186,10 +186,18 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare Tauri signing key
+        id: tauri-signing
         uses: ./.github/actions/prepare-tauri-signing-key
         with:
           private-key: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           password: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Prepare unsigned Tauri build config
+        if: steps.tauri-signing.outputs.configured != 'true'
+        shell: bash
+        run: |
+          printf '%s\n' '{"bundle":{"createUpdaterArtifacts":false}}' > tauri.unsigned.conf.json
+          echo "TAURI_BUILD_CONFIG=tauri.unsigned.conf.json" >> "$GITHUB_ENV"
 
       - name: Build Tauri App (Windows)
         if: runner.os == 'Windows'
@@ -199,17 +207,29 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # 只发布 MSI（和便携版 exe），不打用不上的 NSIS 安装包
-          if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
-            pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi
-          } else {
-            pnpm tauri build --bundles msi
+          $tauriArgs = @('tauri', 'build')
+          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_BUILD_CONFIG)) {
+            $tauriArgs += @('--config', $env:TAURI_BUILD_CONFIG)
           }
+          if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
+            $tauriArgs += @('--target', 'aarch64-pc-windows-msvc', '--bundles', 'msi')
+          } else {
+            $tauriArgs += @('--bundles', 'msi')
+          }
+          pnpm @tauriArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
         env:
           LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-client.so*"
-        run: pnpm tauri build --bundles appimage,deb,rpm
+        run: |
+          set -euo pipefail
+          config_args=()
+          if [ -n "${TAURI_BUILD_CONFIG:-}" ]; then
+            config_args=(--config "$TAURI_BUILD_CONFIG")
+          fi
+          pnpm tauri build --bundles appimage,deb,rpm "${config_args[@]}"
 
       - name: Prepare Windows Assets
         if: runner.os == 'Windows'
@@ -253,8 +273,10 @@ jobs:
             if (Test-Path $sigPath) {
               Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
               Write-Host "Signature copied: $dest.sig"
-            } else {
+            } elseif ($env:TAURI_UPDATER_SIGNED -eq "true") {
               throw "Signature not found for $($msi.Name)"
+            } else {
+              Write-Warning "Updater signatures disabled; skipped $($msi.Name).sig"
             }
           } else {
             throw "No Windows MSI installer found ($env:WINDOWS_RELEASE_ARCH)"
@@ -313,13 +335,17 @@ jobs:
             echo "❌ No AppImage found under target/release/bundle" >&2
             exit 1
           fi
-          if [ ! -f "$APPIMAGE.sig" ]; then
+          if [ "${TAURI_UPDATER_SIGNED:-false}" = "true" ] && [ ! -f "$APPIMAGE.sig" ]; then
             echo "❌ Updater signature not found: $APPIMAGE.sig" >&2
             exit 1
           fi
           NEW_APPIMAGE="CC-Switch-${VERSION}-Linux-${ARCH}.AppImage"
           cp "$APPIMAGE" "release-assets/$NEW_APPIMAGE"
-          cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig"
+          if [ -f "$APPIMAGE.sig" ]; then
+            cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig"
+          else
+            echo "Updater signatures disabled; skipped ${NEW_APPIMAGE}.sig"
+          fi
           echo "AppImage copied: $NEW_APPIMAGE"
           # 额外上传 .deb（用于 Debian/Ubuntu 自动更新）
           DEB=$(find src-tauri/target/release/bundle -name "*.deb" | head -1 || true)
@@ -327,13 +353,17 @@ jobs:
             echo "❌ No .deb found under target/release/bundle" >&2
             exit 1
           fi
-          if [ ! -f "$DEB.sig" ]; then
+          if [ "${TAURI_UPDATER_SIGNED:-false}" = "true" ] && [ ! -f "$DEB.sig" ]; then
             echo "❌ Updater signature not found: $DEB.sig" >&2
             exit 1
           fi
           NEW_DEB="CC-Switch-${VERSION}-Linux-${ARCH}.deb"
           cp "$DEB" "release-assets/$NEW_DEB"
-          cp "$DEB.sig" "release-assets/$NEW_DEB.sig"
+          if [ -f "$DEB.sig" ]; then
+            cp "$DEB.sig" "release-assets/$NEW_DEB.sig"
+          else
+            echo "Updater signatures disabled; skipped ${NEW_DEB}.sig"
+          fi
           echo "Deb package copied: $NEW_DEB"
           # 额外上传 .rpm（用于 Fedora/RHEL/openSUSE 等自动更新）
           RPM=$(find src-tauri/target/release/bundle -name "*.rpm" | head -1 || true)
@@ -504,10 +534,18 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare Tauri signing key
+        id: tauri-signing
         uses: ./.github/actions/prepare-tauri-signing-key
         with:
           private-key: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           password: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Prepare unsigned Tauri build config
+        if: steps.tauri-signing.outputs.configured != 'true'
+        shell: bash
+        run: |
+          printf '%s\n' '{"bundle":{"createUpdaterArtifacts":false}}' > tauri.unsigned.conf.json
+          echo "TAURI_BUILD_CONFIG=tauri.unsigned.conf.json" >> "$GITHUB_ENV"
 
       - name: Import Apple signing certificate
         shell: bash
@@ -586,7 +624,11 @@ jobs:
           for attempt in $(seq 1 "$max_attempts"); do
             echo "=== macOS bundle/notarization attempt ${attempt}/${max_attempts} ==="
             bundle_log="$RUNNER_TEMP/tauri-bundle-macos-${attempt}.log"
-            if pnpm tauri bundle --target universal-apple-darwin --bundles app 2>&1 | tee "$bundle_log"; then
+            config_args=()
+            if [ -n "${TAURI_BUILD_CONFIG:-}" ]; then
+              config_args=(--config "$TAURI_BUILD_CONFIG")
+            fi
+            if pnpm tauri bundle --target universal-apple-darwin --bundles app "${config_args[@]}" 2>&1 | tee "$bundle_log"; then
               echo "✅ macOS bundle/notarization succeeded"
               exit 0
             fi
@@ -630,7 +672,7 @@ jobs:
             fi
           done
 
-          if [ -z "$TAR_GZ" ]; then
+          if [ -z "$TAR_GZ" ] && [ "${TAURI_UPDATER_SIGNED:-false}" = "true" ]; then
             echo "❌ No macOS .tar.gz updater artifact found" >&2
             exit 1
           fi
@@ -658,14 +700,22 @@ jobs:
           echo "✅ .app stapled"
 
           # 1) Collect .tar.gz (updater artifact)
-          NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
-          cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
-          if [ ! -f "$TAR_GZ.sig" ]; then
-            echo "❌ Updater signature not found: $TAR_GZ.sig" >&2
-            exit 1
+          if [ -n "$TAR_GZ" ]; then
+            NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
+            cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
+            if [ "${TAURI_UPDATER_SIGNED:-false}" = "true" ] && [ ! -f "$TAR_GZ.sig" ]; then
+              echo "❌ Updater signature not found: $TAR_GZ.sig" >&2
+              exit 1
+            fi
+            if [ -f "$TAR_GZ.sig" ]; then
+              cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig"
+            else
+              echo "Updater signatures disabled; skipped ${NEW_TAR_GZ}.sig"
+            fi
+            echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          else
+            echo "Updater signatures disabled; skipped macOS .tar.gz"
           fi
-          cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig"
-          echo "macOS updater artifact copied: $NEW_TAR_GZ"
 
           # 2) Collect .app as zip
           NEW_ZIP="CC-Switch-${VERSION}-macOS.zip"
@@ -876,6 +926,13 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          shopt -s nullglob
+          sigs=(release-assets/*.sig)
+          if [ "${#sigs[@]}" -eq 0 ]; then
+            echo "Tauri updater signing key is unavailable; skipping latest.json."
+            exit 0
+          fi
+          shopt -u nullglob
           VERSION="${TAG#v}"
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base_url="https://github.com/$REPO/releases/download/$TAG"

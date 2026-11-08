@@ -11,10 +11,15 @@ inputs:
     description: TAURI_SIGNING_PRIVATE_KEY_PASSWORD secret
     required: false
     default: ""
+outputs:
+  configured:
+    description: Whether a valid Tauri updater signing key was configured
+    value: ${{ steps.prepare.outputs.configured }}
 runs:
   using: composite
   steps:
     - name: Prepare Tauri signing key
+      id: prepare
       shell: bash
       env:
         RAW: ${{ inputs.private-key }}
@@ -22,9 +27,10 @@ runs:
       run: |
         # 调试：检查 Secret 是否存在
         if [ -z "$RAW" ]; then
-          echo "❌ TAURI_SIGNING_PRIVATE_KEY Secret 为空或不存在" >&2
-          echo "请检查 GitHub 仓库 Settings > Secrets and variables > Actions" >&2
-          exit 1
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          echo "TAURI_UPDATER_SIGNED=false" >> "$GITHUB_ENV"
+          echo "⚠️ TAURI_SIGNING_PRIVATE_KEY is unavailable; building without updater artifacts." >&2
+          exit 0
         fi
 
         # 目标：提供正确的私钥“文件路径”给 Tauri CLI，避免内容解码歧义
@@ -70,4 +76,6 @@ runs:
         if [ -n "$KEY_PASSWORD" ]; then
           echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
         fi
+        echo "configured=true" >> "$GITHUB_OUTPUT"
+        echo "TAURI_UPDATER_SIGNED=true" >> "$GITHUB_ENV"
         echo "✅ Tauri signing key prepared"

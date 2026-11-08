@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Release 流水线 Tauri 签名密钥修复</title>
+<style>
+:root{--ink:#172033;--muted:#566173;--line:#d8e0ec;--brand:#0f5fa8;--warn:#955c00;--ok:#1b6f4a;--bg:#f4f7fb}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}
+main{max-width:1040px;margin:0 auto;padding:32px 20px 60px}
+h1,h2{line-height:1.3}h1{font-size:30px;margin:0 0 10px}h2{font-size:22px;margin:30px 0 10px}
+.hero{background:linear-gradient(135deg,#0f5fa8,#1b4a76);color:#fff;border-radius:18px;padding:28px}
+.hero p{margin:0;color:rgba(255,255,255,.84)}
+section{background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px;margin-top:16px;box-shadow:0 8px 20px rgba(23,32,51,.05)}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{background:#eaf1fa;color:#274765}
+code{background:#eef2f7;border-radius:5px;padding:1px 4px;font-size:.93em}
+.flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:stretch;gap:8px;margin-top:10px}
+.node{border:1px solid #b8cee5;background:#f4f8fd;border-radius:10px;padding:12px}
+.node strong{display:block;color:#25425f}.node span{color:var(--muted);display:block;margin-top:3px}
+.arrow{text-align:center;font-size:20px;color:var(--muted)}
+.warn{border-left:4px solid var(--warn);background:#fff4e0;color:#6a3d00;padding:12px;border-radius:8px}
+.ok{border-left:4px solid var(--ok);background:#e6f4ee;color:#1b5c40;padding:12px;border-radius:8px}
+pre{background:#16243a;color:#e8eefb;padding:14px;border-radius:10px;overflow:auto;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
+footer{margin-top:18px;color:var(--muted);font-size:12px}
+@media(max-width:760px){.flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}}
+</style>
+</head>
+<body><main>
+<header class="hero"><h1>Release 流水线 Tauri 签名密钥修复</h1><p>失败 Run：#42176205808；根因是上游 4.0.26 的 Release 流程将 Tauri updater 私钥变为硬性依赖，而当前 fork 仓库未配置 <code>TAURI_SIGNING_PRIVATE_KEY</code>。修复恢复 fork 既有策略：无密钥时构建常规安装包并禁用 updater 产物，有密钥时完整生成签名和 <code>latest.json</code>。</p></header>
+
+<section>
+<h2>故障定位</h2>
+<table><thead><tr><th>检查项</th><th>结果</th></tr></thead><tbody>
+<tr><td>失败的 Release job</td><td>Windows x64/ARM64、Linux x64/ARM64、macOS bundle 均在 <code>Prepare Tauri signing key</code> 失败</td></tr>
+<tr><td>通过的前置 job</td><td>whats-new 校验、macOS x64/ARM64 二进制构建均成功</td></tr>
+<tr><td>代码编译</td><td>失败点发生在 Tauri bundle 阶段之前，不是 Rust/前端编译错误</td></tr>
+<tr><td>工作流行为差异</td><td>旧 fork 3.20.4 的 Release 在密钥缺失时设置 <code>TAURI_UPDATER_SIGNED=false</code> 并禁用 updater；新 upstream 4.0.26 直接 <code>exit 1</code></td></tr>
+</tbody></table>
+</section>
+
+<section>
+<h2>修复流程</h2>
+<div class="flow">
+<div class="node"><strong>读取 TAURI_SIGNING_PRIVATE_KEY</strong><span>由 composite action 统一识别两行 key、整体 base64 或单行 base64。</span></div><div class="arrow">→</div>
+<div class="node"><strong>密钥存在</strong><span><code>configured=true</code>；生成签名环境变量，构建 updater artifacts。</span></div><div class="arrow">→</div>
+<div class="node"><strong>生成 latest.json</strong><span>发布前检查所有平台签名，任何缺失都失败，避免半更新能力。</span></div>
+</div>
+<div class="flow">
+<div class="node"><strong>密钥缺失</strong><span><code>configured=false</code>；不再让 job 失败。</span></div><div class="arrow">→</div>
+<div class="node"><strong>禁用 updater 产物</strong><span>写入 <code>createUpdaterArtifacts:false</code> 覆盖配置，并在 Windows/Linux/macOS 构建时传入 <code>--config</code>。</span></div><div class="arrow">→</div>
+<div class="node"><strong>发布常规安装包</strong><span>MSI、Portable、AppImage、deb、rpm、zip、DMG 仍发布；无 <code>.sig</code> 时不生成 <code>latest.json</code>。</span></div>
+</div>
+</section>
+
+<section>
+<h2>修改文件</h2>
+<table><thead><tr><th>文件</th><th>修复</th></tr></thead><tbody>
+<tr><td><code>.github/actions/prepare-tauri-signing-key/action.yml</code></td><td>新增 <code>configured</code> 输出；密钥缺失时输出 false 并设置 <code>TAURI_UPDATER_SIGNED=false</code>，成功时输出 true。</td></tr>
+<tr><td><code>.github/workflows/release.yml</code></td><td>无密钥时生成 unsigned Tauri config；各平台构建传入该配置；资产收集允许跳过签名；发布阶段仅在存在签名时生成 latest.json。</td></tr>
+</tbody></table>
+<div class="warn"><strong>发布能力说明：</strong>该修复能让 Release 流水线在未配置 updater 私钥时完成，但本版本不提供应用内自动更新。用户仍可从 GitHub Release 手动下载安装包。如需自动更新，请配置 <code>TAURI_SIGNING_PRIVATE_KEY</code> 和 <code>TAURI_SIGNING_PRIVATE_KEY_PASSWORD</code>。</div>
+</section>
+
+<section>
+<h2>校验</h2>
+<ul>
+<li>YAML 解析通过（PyYAML safe_load）。</li>
+<li>actionlint 1.7.12 校验 <code>.github/workflows/release.yml</code> 无错误。</li>
+<li>本地模拟 composite action：空密钥输出 <code>configured=false</code> / <code>TAURI_UPDATER_SIGNED=false</code>；有效测试密钥输出 <code>configured=true</code>。</li>
+<li>签名存在时仍保留原强校验：缺少任一平台签名会阻止发布。</li>
+</ul>
+<div class="ok">建议合并前先用 <code>workflow_dispatch</code> 在修复分支做一次 Release dry-run，确认全部平台能产出资产后，再推送正式 tag。</div>
+</section>
+<footer>生成时间：2026-11-08 · 分支：codex/fix/release-tauri-signing · 失败 Run：42176205808</footer>
+</main></body></html>
